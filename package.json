@@ -1,6 +1,6 @@
 {
   "name": "ssh-studio",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Linux SSH client with SFTP file tree, Monaco editor, and integrated terminal.",
   "author": {
@@ -15,8 +15,8 @@
     "build": "npm run typecheck && electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit",
-    "package:deb": "npm run build && electron-builder --linux deb --x64",
-    "package": "npm run build && electron-builder --linux"
+    "package:deb": "npm run build && electron-builder --linux deb --x64 --publish never",
+    "package": "npm run build && electron-builder --linux --publish never"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",

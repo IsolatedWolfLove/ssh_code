@@ -1,0 +1,76 @@
+name: Build Linux Deb
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build-deb:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Linux packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fakeroot dpkg
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Prepare Debian metadata
+        env:
+          REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const packageJsonPath = 'package.json';
+          const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+          const owner = process.env.REPOSITORY_OWNER;
+          const homepage = process.env.REPOSITORY_URL;
+          const email = `${owner}@users.noreply.github.com`;
+
+          pkg.homepage ??= homepage;
+          pkg.author = typeof pkg.author === 'string'
+            ? { name: pkg.author, email }
+            : {
+                name: pkg.author?.name || owner,
+                email: pkg.author?.email || email,
+              };
+          pkg.build ??= {};
+          pkg.build.linux ??= {};
+          pkg.build.linux.maintainer ??= `${pkg.author.name} <${pkg.author.email}>`;
+
+          fs.writeFileSync(packageJsonPath, `${JSON.stringify(pkg, null, 2)}\n`);
+          NODE
+
+      - name: Read app version
+        run: echo "APP_VERSION=$(node -p \"JSON.parse(require('fs').readFileSync('package.json', 'utf8')).version\")" >> "$GITHUB_ENV"
+
+      - name: Build Debian package
+        run: npm run package:deb
+
+      - name: Upload Debian artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-studio-deb-${{ env.APP_VERSION }}
+          path: release/*.deb
+          if-no-files-found: error

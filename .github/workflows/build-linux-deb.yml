@@ -10,7 +10,7 @@ on:
       - 'v*'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-deb:
@@ -76,3 +76,10 @@ jobs:
           name: ssh-studio-deb-${{ env.APP_VERSION }}
           path: release/*.deb
           if-no-files-found: error
+
+      - name: Upload Debian package to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*.deb
+          fail_on_unmatched_files: true

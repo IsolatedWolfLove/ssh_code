@@ -3,6 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "description": "Linux SSH client with SFTP file tree, Monaco editor, and integrated terminal.",
+  "author": {
+    "name": "IsolatedWolfLove",
+    "email": "IsolatedWolfLove@users.noreply.github.com"
+  },
+  "homepage": "https://github.com/IsolatedWolfLove/ssh_code",
   "type": "module",
   "main": "out/main/index.js",
   "scripts": {
@@ -51,6 +56,7 @@
         "AppImage",
         "dir"
       ],
+      "maintainer": "IsolatedWolfLove <IsolatedWolfLove@users.noreply.github.com>",
       "category": "Development"
     }
   }

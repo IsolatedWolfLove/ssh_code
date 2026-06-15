@@ -14,6 +14,7 @@ import { ConnectionForm } from './components/ConnectionForm';
 import { EntryDialog } from './components/EntryDialog';
 import { EditorTabs, type EditorTabItem } from './components/EditorTabs';
 import { FileTree } from './components/FileTree';
+import { FolderPickerDialog } from './components/FolderPickerDialog';
 import { TerminalPanel } from './components/TerminalPanel';
 
 const RemoteEditor = lazy(() => import('./components/RemoteEditor'));
@@ -164,6 +165,8 @@ export function App() {
   const [fileMenuOpen, setFileMenuOpen] = useState(false);
   const [entryDialog, setEntryDialog] = useState<EntryDialogState | null>(null);
   const [entryDialogBusy, setEntryDialogBusy] = useState(false);
+  const [folderPickerInitialPath, setFolderPickerInitialPath] = useState<string | null>(null);
+  const [folderPickerBusy, setFolderPickerBusy] = useState(false);
   const [savedConnectionRenameDialog, setSavedConnectionRenameDialog] =
     useState<SavedConnectionRenameDialogState | null>(null);
   const [savedConnectionRenameBusy, setSavedConnectionRenameBusy] = useState(false);
@@ -216,6 +219,7 @@ export function App() {
         setCurrentSavedConnectionId(null);
         setShowConnectionScreen(true);
         setEntryDialog(null);
+        setFolderPickerInitialPath(null);
         setSavedConnectionRenameDialog(null);
       }
     });
@@ -363,6 +367,7 @@ export function App() {
     clearAllAutoSaveTimers();
     setFileMenuOpen(false);
     setEntryDialog(null);
+    setFolderPickerInitialPath(null);
 
     try {
       await window.electronAPI.disconnect();
@@ -687,13 +692,18 @@ export function App() {
     }
   }
 
-  async function enterDirectory(remotePath: string): Promise<void> {
+  async function enterDirectory(remotePath: string): Promise<boolean> {
+    setFileMenuOpen(false);
+    const loaded = await refreshDirectory(remotePath, true);
+    if (!loaded) {
+      return false;
+    }
+
     setWorkspacePath(remotePath);
     setSelectedTreePath(remotePath);
     setExpandedDirectories(new Set([remotePath]));
-    setFileMenuOpen(false);
-    await refreshDirectory(remotePath, true);
     setStatusMessage(`Entered ${remotePath}`);
+    return true;
   }
 
   async function openNewWindow(): Promise<void> {
@@ -801,6 +811,32 @@ export function App() {
     });
   }
 
+  function openFolderPicker(): void {
+    setFileMenuOpen(false);
+    setFolderPickerInitialPath(getActionDirectoryPath());
+  }
+
+  function closeFolderPicker(): void {
+    if (folderPickerBusy) {
+      return;
+    }
+
+    setFolderPickerInitialPath(null);
+  }
+
+  async function submitFolderPicker(remotePath: string): Promise<void> {
+    setFolderPickerBusy(true);
+
+    try {
+      const entered = await enterDirectory(remotePath);
+      if (entered) {
+        setFolderPickerInitialPath(null);
+      }
+    } finally {
+      setFolderPickerBusy(false);
+    }
+  }
+
   function closeEntryDialog(): void {
     if (entryDialogBusy) {
       return;
@@ -868,15 +904,6 @@ export function App() {
     return workspacePath;
   }
 
-  async function openSelectedFolder(): Promise<void> {
-    if (selectedEntry?.kind === 'directory') {
-      await enterDirectory(selectedEntry.path);
-      return;
-    }
-
-    await enterDirectory(workspacePath);
-  }
-
   const handleSelectTreePath = useStableCallback((remotePath: string) => {
     setSelectedTreePath(remotePath);
   });
@@ -930,7 +957,7 @@ export function App() {
                     className="menu-item"
                     disabled={!isConnected}
                     onClick={() => {
-                      void openSelectedFolder();
+                      openFolderPicker();
                     }}
                   >
                     Open Folder
@@ -1161,6 +1188,19 @@ export function App() {
           onCancel={closeEntryDialog}
           onSubmit={() => {
             void submitEntryDialog();
+          }}
+        />
+      ) : null}
+
+      {folderPickerInitialPath ? (
+        <FolderPickerDialog
+          initialPath={folderPickerInitialPath}
+          homePath={rootPath}
+          isBusy={folderPickerBusy}
+          onReadDirectory={window.electronAPI.readDir}
+          onCancel={closeFolderPicker}
+          onConfirm={(remotePath) => {
+            void submitFolderPicker(remotePath);
           }}
         />
       ) : null}

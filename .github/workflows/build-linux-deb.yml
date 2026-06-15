@@ -63,7 +63,9 @@ jobs:
           NODE
 
       - name: Read app version
-        run: echo "APP_VERSION=$(node -p \"JSON.parse(require('fs').readFileSync('package.json', 'utf8')).version\")" >> "$GITHUB_ENV"
+        run: |
+          APP_VERSION=$(node -p "require('./package.json').version")
+          echo "APP_VERSION=${APP_VERSION}" >> "$GITHUB_ENV"
 
       - name: Build Debian package
         run: npm run package:deb

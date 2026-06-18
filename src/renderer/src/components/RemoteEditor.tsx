@@ -1,5 +1,7 @@
 import { Editor, type OnMount } from '@monaco-editor/react';
 import { RefreshCw } from 'lucide-react';
+import type * as MonacoEditor from 'monaco-editor';
+import { useEffect, useRef } from 'react';
 
 import type { EditorTabItem } from './EditorTabs';
 import { monaco } from '../monaco';
@@ -8,6 +10,7 @@ interface RemoteEditorProps {
   isLoadingFile: boolean;
   language: string;
   tab: EditorTabItem;
+  revealTarget?: { line: number; column: number } | null;
   onChange: (nextContent: string | undefined) => void;
 }
 
@@ -45,13 +48,34 @@ const handleMount: OnMount = (editor) => {
   editor.focus();
 };
 
-export function RemoteEditor({ isLoadingFile, language, tab, onChange }: RemoteEditorProps) {
+export function RemoteEditor({ isLoadingFile, language, tab, revealTarget, onChange }: RemoteEditorProps) {
+  const editorRef = useRef<MonacoEditor.editor.IStandaloneCodeEditor | null>(null);
+
+  const handleEditorMount: OnMount = (editor, monacoInstance) => {
+    editorRef.current = editor;
+    handleMount(editor, monacoInstance);
+  };
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor || !revealTarget) {
+      return;
+    }
+
+    editor.setPosition({
+      lineNumber: revealTarget.line,
+      column: revealTarget.column,
+    });
+    editor.revealLineInCenter(revealTarget.line);
+    editor.focus();
+  }, [revealTarget, tab.id]);
+
   return (
     <Editor
       path={`ssh://${tab.connectionId}${tab.path}`}
       language={language}
       value={tab.content}
-      onMount={handleMount}
+      onMount={handleEditorMount}
       onChange={onChange}
       theme="ssh-studio"
       loading={

@@ -1,20 +1,23 @@
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
-import { ChevronDown, CircleAlert, FolderSearch, RefreshCw } from 'lucide-react';
+import { ChevronDown, CircleAlert, FolderSearch, RefreshCw, Search, Download, Upload, Trash2, PencilLine } from 'lucide-react';
 import { Suspense, lazy, startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import type {
   ConnectInput,
   ConnectResult,
   ConnectionStatePayload,
+  RemoteFileSystemState,
   RemoteDirectoryEntry,
   SavedConnectionSummary,
   SaveRemoteFileResult,
+  SearchRemoteFilesResult,
 } from '../../shared/contracts';
 import { ConnectionForm } from './components/ConnectionForm';
 import { EntryDialog } from './components/EntryDialog';
 import { EditorTabs, type EditorTabItem } from './components/EditorTabs';
 import { FileTree } from './components/FileTree';
 import { FolderPickerDialog } from './components/FolderPickerDialog';
+import { SearchDialog } from './components/SearchDialog';
 import { TerminalPanel } from './components/TerminalPanel';
 
 const RemoteEditor = lazy(() => import('./components/RemoteEditor'));
@@ -23,12 +26,19 @@ const DEFAULT_CONNECTION_FORM: ConnectInput = {
   host: '',
   port: 22,
   username: '',
+  authMethod: 'password',
   password: '',
+  privateKeyPath: '',
+  passphrase: '',
+  agentSocket: '',
+  hostVerification: 'off',
+  knownHostsPath: '',
 };
 
 const DEFAULT_CONNECTION_STATUS: ConnectionStatePayload = {
   state: 'disconnected',
   message: 'Disconnected',
+  filesystemState: 'idle',
 };
 
 type EntryDialogState =
@@ -47,6 +57,13 @@ type EntryDialogState =
 interface SavedConnectionRenameDialogState {
   savedConnectionId: string;
   value: string;
+}
+
+interface TreeContextMenuState {
+  path: string;
+  kind: 'directory' | 'file';
+  x: number;
+  y: number;
 }
 
 function getErrorMessage(error: unknown, fallback: string): string {
@@ -122,6 +139,19 @@ function mergeWorkspacePaths(existingPaths: string[], nextPath: string): string[
   return [workspacePath, ...existingPaths.filter((path) => path !== workspacePath)].slice(0, 6);
 }
 
+function getFileSystemStatusText(filesystemState: RemoteFileSystemState | undefined): string {
+  switch (filesystemState) {
+    case 'loading':
+      return 'Preparing files';
+    case 'ready':
+      return 'Files ready';
+    case 'error':
+      return 'Files unavailable';
+    default:
+      return 'Files idle';
+  }
+}
+
 function useStableCallback<Args extends unknown[], Return>(
   callback: (...args: Args) => Return,
 ): (...args: Args) => Return {
@@ -170,13 +200,36 @@ export function App() {
   const [savedConnectionRenameDialog, setSavedConnectionRenameDialog] =
     useState<SavedConnectionRenameDialogState | null>(null);
   const [savedConnectionRenameBusy, setSavedConnectionRenameBusy] = useState(false);
+  const [treeContextMenu, setTreeContextMenu] = useState<TreeContextMenuState | null>(null);
+  const [searchDialogOpen, setSearchDialogOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchCaseSensitive, setSearchCaseSensitive] = useState(false);
+  const [searchResults, setSearchResults] = useState<SearchRemoteFilesResult | null>(null);
+  const [searchBusy, setSearchBusy] = useState(false);
+  const [editorRevealTarget, setEditorRevealTarget] = useState<{ tabId: string; line: number; column: number } | null>(null);
   const autoSaveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const directoryLoadPromisesRef = useRef(new Map<string, Promise<boolean>>());
+  const idlePrefetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingWorkspacePathRef = useRef<string | null>(null);
   const fileMenuRef = useRef<HTMLDivElement | null>(null);
+  const treeContextMenuRef = useRef<HTMLDivElement | null>(null);
 
   const activeTab = useMemo(
     () => tabs.find((tab) => tab.id === activeTabId) ?? null,
     [activeTabId, tabs],
   );
+  const groupedSearchResults = useMemo(() => {
+    const grouped = new Map<string, SearchRemoteFilesResult['matches']>();
+    for (const match of searchResults?.matches ?? []) {
+      const items = grouped.get(match.path);
+      if (items) {
+        items.push(match);
+      } else {
+        grouped.set(match.path, [match]);
+      }
+    }
+    return [...grouped.entries()];
+  }, [searchResults]);
   const workspaceName = getWorkspaceName(workspacePath);
   const selectedEntry = useMemo(
     () => {
@@ -221,11 +274,33 @@ export function App() {
         setEntryDialog(null);
         setFolderPickerInitialPath(null);
         setSavedConnectionRenameDialog(null);
+        setSearchDialogOpen(false);
       }
     });
 
     return unsubscribe;
   }, []);
+
+  useEffect(() => {
+    if (connectionStatus.state !== 'connected' || connectionStatus.filesystemState !== 'ready') {
+      return;
+    }
+
+    const pendingWorkspacePath = pendingWorkspacePathRef.current;
+    if (!pendingWorkspacePath) {
+      return;
+    }
+
+    pendingWorkspacePathRef.current = null;
+    void initializeRemoteState(
+      {
+        connectionId: connectionStatus.connectionId ?? currentConnectionId ?? '',
+        homeDir: connectionStatus.homeDir,
+        filesystemState: 'ready',
+      },
+      pendingWorkspacePath,
+    );
+  }, [connectionStatus, currentConnectionId]);
 
   useEffect(() => {
     void loadSavedConnections(true);
@@ -260,24 +335,37 @@ export function App() {
 
   useEffect(() => {
     function handleKeydown(event: KeyboardEvent): void {
-      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 's') {
+      if (!(event.ctrlKey || event.metaKey)) {
         return;
       }
 
-      event.preventDefault();
-      saveActiveTab();
+      const key = event.key.toLowerCase();
+      if (key === 's') {
+        event.preventDefault();
+        saveActiveTab();
+        return;
+      }
+
+      if (event.shiftKey && key === 'f' && !showConnectionScreen) {
+        event.preventDefault();
+        setSearchDialogOpen(true);
+      }
     }
 
     window.addEventListener('keydown', handleKeydown);
     return () => {
       window.removeEventListener('keydown', handleKeydown);
     };
-  }, [saveActiveTab]);
+  }, [saveActiveTab, showConnectionScreen]);
 
   useEffect(() => {
     function handlePointerDown(event: MouseEvent): void {
       if (!fileMenuRef.current?.contains(event.target as Node)) {
         setFileMenuOpen(false);
+      }
+
+      if (treeContextMenu && !treeContextMenuRef.current?.contains(event.target as Node)) {
+        setTreeContextMenu(null);
       }
     }
 
@@ -285,15 +373,32 @@ export function App() {
     return () => {
       document.removeEventListener('mousedown', handlePointerDown);
     };
-  }, []);
+  }, [treeContextMenu]);
 
   useEffect(() => {
     return () => {
       for (const timer of Object.values(autoSaveTimersRef.current)) {
         clearTimeout(timer);
       }
+      if (idlePrefetchTimerRef.current) {
+        clearTimeout(idlePrefetchTimerRef.current);
+      }
     };
   }, []);
+
+  useEffect(() => {
+    if (!editorRevealTarget || activeTab?.id !== editorRevealTarget.tabId) {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      setEditorRevealTarget(null);
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, [activeTab?.id, editorRevealTarget]);
 
   useEffect(() => {
     for (const tab of tabs) {
@@ -368,6 +473,7 @@ export function App() {
     setFileMenuOpen(false);
     setEntryDialog(null);
     setFolderPickerInitialPath(null);
+    setSearchDialogOpen(false);
 
     try {
       await window.electronAPI.disconnect();
@@ -384,23 +490,35 @@ export function App() {
     result: ConnectResult,
     preferredWorkspacePath?: string,
   ): Promise<void> {
-    const nextWorkspacePath = preferredWorkspacePath?.trim() || result.homeDir;
+    const resolvedHomeDir = result.homeDir?.trim() || connectionStatus.homeDir?.trim();
+    if (!resolvedHomeDir) {
+      pendingWorkspacePathRef.current = preferredWorkspacePath?.trim() || null;
+      return;
+    }
 
-    setRootPath(result.homeDir);
+    const nextWorkspacePath = preferredWorkspacePath?.trim() || resolvedHomeDir;
+
+    if (result.filesystemState !== 'ready') {
+      pendingWorkspacePathRef.current = nextWorkspacePath;
+      setStatusMessage('Connected. Preparing remote files...');
+      return;
+    }
+
+    setRootPath(resolvedHomeDir);
     setWorkspacePath(nextWorkspacePath);
     setSelectedTreePath(nextWorkspacePath);
     setEntriesByDirectory({});
     setExpandedDirectories(new Set([nextWorkspacePath]));
 
     const loaded = await refreshDirectory(nextWorkspacePath, true);
-    if (loaded || nextWorkspacePath === result.homeDir) {
+    if (loaded || nextWorkspacePath === resolvedHomeDir) {
       return;
     }
 
-    setWorkspacePath(result.homeDir);
-    setSelectedTreePath(result.homeDir);
-    setExpandedDirectories(new Set([result.homeDir]));
-    await refreshDirectory(result.homeDir, true);
+    setWorkspacePath(resolvedHomeDir);
+    setSelectedTreePath(resolvedHomeDir);
+    setExpandedDirectories(new Set([resolvedHomeDir]));
+    await refreshDirectory(resolvedHomeDir, true);
   }
 
   async function loadSavedConnections(silent = false): Promise<void> {
@@ -503,39 +621,50 @@ export function App() {
   }
 
   async function refreshDirectory(remotePath: string, forceExpand = false): Promise<boolean> {
-    setLoadingDirectories((previous) => {
-      const next = new Set(previous);
-      next.add(remotePath);
-      return next;
-    });
+    const existingTask = directoryLoadPromisesRef.current.get(remotePath);
+    if (existingTask) {
+      return existingTask;
+    }
 
-    try {
-      const entries = await window.electronAPI.readDir(remotePath);
-      startTransition(() => {
-        setEntriesByDirectory((previous) => ({
-          ...previous,
-          [remotePath]: entries,
-        }));
-
-        if (forceExpand) {
-          setExpandedDirectories((previous) => {
-            const next = new Set(previous);
-            next.add(remotePath);
-            return next;
-          });
-        }
-      });
-      return true;
-    } catch (error) {
-      setStatusMessage(getErrorMessage(error, `Unable to read ${remotePath}`));
-      return false;
-    } finally {
+    const task = (async () => {
       setLoadingDirectories((previous) => {
         const next = new Set(previous);
-        next.delete(remotePath);
+        next.add(remotePath);
         return next;
       });
-    }
+
+      try {
+        const entries = await window.electronAPI.readDir(remotePath);
+        startTransition(() => {
+          setEntriesByDirectory((previous) => ({
+            ...previous,
+            [remotePath]: entries,
+          }));
+
+          if (forceExpand) {
+            setExpandedDirectories((previous) => {
+              const next = new Set(previous);
+              next.add(remotePath);
+              return next;
+            });
+          }
+        });
+        return true;
+      } catch (error) {
+        setStatusMessage(getErrorMessage(error, `Unable to read ${remotePath}`));
+        return false;
+      } finally {
+        directoryLoadPromisesRef.current.delete(remotePath);
+        setLoadingDirectories((previous) => {
+          const next = new Set(previous);
+          next.delete(remotePath);
+          return next;
+        });
+      }
+    })();
+
+    directoryLoadPromisesRef.current.set(remotePath, task);
+    return task;
   }
 
   function findMatchingSavedConnection(input: Pick<ConnectInput, 'host' | 'port' | 'username'>): SavedConnectionSummary | null {
@@ -572,7 +701,7 @@ export function App() {
     }
   }
 
-  async function openFile(remotePath: string): Promise<void> {
+  async function openFile(remotePath: string, revealTarget?: { line: number; column: number }): Promise<void> {
     setSelectedTreePath(remotePath);
     if (!currentConnectionId) {
       setStatusMessage('Connect before opening files');
@@ -585,6 +714,13 @@ export function App() {
 
     if (existingTab) {
       setActiveTabId(existingTab.id);
+      if (revealTarget) {
+        setEditorRevealTarget({
+          tabId: existingTab.id,
+          line: revealTarget.line,
+          column: revealTarget.column,
+        });
+      }
       return;
     }
 
@@ -606,6 +742,13 @@ export function App() {
 
       setTabs((previous) => [...previous, nextTab]);
       setActiveTabId(nextTab.id);
+      if (revealTarget) {
+        setEditorRevealTarget({
+          tabId: nextTab.id,
+          line: revealTarget.line,
+          column: revealTarget.column,
+        });
+      }
       setStatusMessage(`Opened ${remotePath}`);
     } catch (error) {
       setStatusMessage(getErrorMessage(error, `Unable to open ${remotePath}`));
@@ -792,6 +935,80 @@ export function App() {
     }
   }
 
+  async function deleteEntry(entry: RemoteDirectoryEntry): Promise<void> {
+    await window.electronAPI.deleteEntry({ path: entry.path });
+    const parentPath = entry.kind === 'directory' ? getParentPath(entry.path) : getParentPath(entry.path);
+    if (entry.path === workspacePath) {
+      await refreshDirectory(rootPath, true);
+      setWorkspacePath(rootPath);
+      setSelectedTreePath(rootPath);
+    } else {
+      await refreshDirectory(parentPath, true);
+      setSelectedTreePath(parentPath);
+    }
+
+    const deletedPrefix = `${entry.path}/`;
+    setTabs((previous) =>
+      previous.filter((tab) => tab.path !== entry.path && !tab.path.startsWith(deletedPrefix)),
+    );
+    if (activeTab && (activeTab.path === entry.path || activeTab.path.startsWith(deletedPrefix))) {
+      setActiveTabId(null);
+    }
+    setStatusMessage(`Deleted ${entry.path}`);
+  }
+
+  async function uploadToDirectory(remotePath: string): Promise<void> {
+    await window.electronAPI.uploadLocalEntries(remotePath);
+    await refreshDirectory(remotePath, true);
+    setStatusMessage(`Uploaded into ${remotePath}`);
+  }
+
+  async function downloadEntry(entry: RemoteDirectoryEntry): Promise<void> {
+    await window.electronAPI.downloadEntry(entry.path);
+    setStatusMessage(`Downloaded ${entry.path}`);
+  }
+
+  async function runSearch(): Promise<void> {
+    const query = searchQuery.trim();
+    if (query === '') {
+      setSearchResults(null);
+      return;
+    }
+
+    setSearchBusy(true);
+    try {
+      const result = await window.electronAPI.searchInFiles({
+        rootPath: workspacePath,
+        query,
+        caseSensitive: searchCaseSensitive,
+      });
+      setSearchResults(result);
+      setStatusMessage(
+        `Found ${result.matches.length} matches for "${query}"${result.truncated ? ' (truncated)' : ''}`,
+      );
+    } catch (error) {
+      setStatusMessage(getErrorMessage(error, `Unable to search in ${workspacePath}`));
+    } finally {
+      setSearchBusy(false);
+    }
+  }
+
+  function openSearchDialog(): void {
+    if (!isConnected) {
+      return;
+    }
+
+    setSearchDialogOpen(true);
+  }
+
+  function closeSearchDialog(): void {
+    if (searchBusy) {
+      return;
+    }
+
+    setSearchDialogOpen(false);
+  }
+
   function openCreateEntryDialog(parentPath: string, kind: 'directory' | 'file'): void {
     setFileMenuOpen(false);
     setEntryDialog({
@@ -891,6 +1108,40 @@ export function App() {
   }
 
   const isConnected = connectionStatus.state === 'connected';
+  const fileSystemReady = connectionStatus.filesystemState === 'ready';
+
+  useEffect(() => {
+    if (!fileSystemReady) {
+      if (idlePrefetchTimerRef.current) {
+        clearTimeout(idlePrefetchTimerRef.current);
+        idlePrefetchTimerRef.current = null;
+      }
+      return;
+    }
+
+    const currentEntries = entriesByDirectory[workspacePath] ?? [];
+    const prefetchCandidates = currentEntries
+      .filter((entry) => entry.kind === 'directory' && !entriesByDirectory[entry.path])
+      .slice(0, 4);
+
+    if (prefetchCandidates.length === 0) {
+      return;
+    }
+
+    idlePrefetchTimerRef.current = setTimeout(() => {
+      idlePrefetchTimerRef.current = null;
+      for (const entry of prefetchCandidates) {
+        void refreshDirectory(entry.path);
+      }
+    }, 400);
+
+    return () => {
+      if (idlePrefetchTimerRef.current) {
+        clearTimeout(idlePrefetchTimerRef.current);
+        idlePrefetchTimerRef.current = null;
+      }
+    };
+  }, [entriesByDirectory, fileSystemReady, workspacePath]);
 
   function getActionDirectoryPath(): string {
     if (selectedEntry?.kind === 'directory') {
@@ -916,6 +1167,68 @@ export function App() {
   const handleRefreshDirectory = useStableCallback((remotePath: string) => {
     void refreshDirectory(remotePath, true);
   });
+  const handleOpenTreeContextMenu = useStableCallback(
+    (remotePath: string, kind: 'directory' | 'file', position: { x: number; y: number }) => {
+      setTreeContextMenu({
+        path: remotePath,
+        kind,
+        x: position.x,
+        y: position.y,
+      });
+    },
+  );
+  const handleTreeContextMenuAction = useStableCallback(
+    (action: 'upload' | 'download' | 'rename' | 'delete' | 'create-file' | 'create-folder', path: string) => {
+      setTreeContextMenu(null);
+      const entry =
+        path === workspacePath
+          ? ({
+              path: workspacePath,
+              name: workspaceName,
+              kind: 'directory',
+            } satisfies RemoteDirectoryEntry)
+          : Object.values(entriesByDirectory)
+              .flat()
+              .find((item) => item.path === path);
+
+      if (!entry) {
+        return;
+      }
+
+      setSelectedTreePath(entry.path);
+
+      if (action === 'upload' && entry.kind === 'directory') {
+        void uploadToDirectory(entry.path);
+        return;
+      }
+
+      if (action === 'download') {
+        void downloadEntry(entry);
+        return;
+      }
+
+      if (action === 'rename') {
+        openRenameEntryDialog(entry);
+        return;
+      }
+
+      if (action === 'delete') {
+        void deleteEntry(entry).catch((error) => {
+          setStatusMessage(getErrorMessage(error, `Unable to delete ${entry.path}`));
+        });
+        return;
+      }
+
+      if (action === 'create-file' && entry.kind === 'directory') {
+        openCreateEntryDialog(entry.path, 'file');
+        return;
+      }
+
+      if (action === 'create-folder' && entry.kind === 'directory') {
+        openCreateEntryDialog(entry.path, 'directory');
+      }
+    },
+  );
 
   const entryDialogMeta =
     entryDialog?.mode === 'rename'
@@ -952,33 +1265,33 @@ export function App() {
 
               {fileMenuOpen ? (
                 <div className="menu-dropdown">
-                  <button
-                    type="button"
-                    className="menu-item"
-                    disabled={!isConnected}
-                    onClick={() => {
-                      openFolderPicker();
-                    }}
+              <button
+                type="button"
+                className="menu-item"
+                disabled={!isConnected || !fileSystemReady}
+                onClick={() => {
+                  openFolderPicker();
+                }}
                   >
                     Open Folder
                   </button>
                   <button
-                    type="button"
-                    className="menu-item"
-                    disabled={!isConnected}
-                    onClick={() => {
-                      openCreateEntryDialog(getActionDirectoryPath(), 'file');
-                    }}
+                type="button"
+                className="menu-item"
+                disabled={!isConnected || !fileSystemReady}
+                onClick={() => {
+                  openCreateEntryDialog(getActionDirectoryPath(), 'file');
+                }}
                   >
                     New File
                   </button>
                   <button
-                    type="button"
-                    className="menu-item"
-                    disabled={!isConnected}
-                    onClick={() => {
-                      openCreateEntryDialog(getActionDirectoryPath(), 'directory');
-                    }}
+                type="button"
+                className="menu-item"
+                disabled={!isConnected || !fileSystemReady}
+                onClick={() => {
+                  openCreateEntryDialog(getActionDirectoryPath(), 'directory');
+                }}
                   >
                     New Folder
                   </button>
@@ -1017,6 +1330,18 @@ export function App() {
                 </div>
               ) : null}
             </div>
+            <button
+              type="button"
+              className="menu-button topbar-tool-button"
+              disabled={!isConnected}
+              onClick={() => {
+                openSearchDialog();
+              }}
+              title="Global Search (Ctrl/Cmd+Shift+F)"
+            >
+              <Search size={13} />
+              <span>Search</span>
+            </button>
           </div>
 
           <div className="menu-bar-center" title={workspacePath}>
@@ -1107,7 +1432,14 @@ export function App() {
                   onToggleDirectory={handleToggleDirectory}
                   onOpenFile={handleOpenFile}
                   onRefreshDirectory={handleRefreshDirectory}
+                  onOpenContextMenu={handleOpenTreeContextMenu}
                 />
+                {!fileSystemReady ? (
+                  <div className="sidebar-overlay">
+                    <RefreshCw className={connectionStatus.filesystemState === 'loading' ? 'spin' : ''} size={16} />
+                    <span>{getFileSystemStatusText(connectionStatus.filesystemState)}</span>
+                  </div>
+                ) : null}
               </aside>
             </Panel>
 
@@ -1134,6 +1466,11 @@ export function App() {
                         isLoadingFile={isLoadingFile}
                         language={detectLanguage(activeTab.path)}
                         tab={activeTab}
+                        revealTarget={
+                          editorRevealTarget?.tabId === activeTab.id
+                            ? { line: editorRevealTarget.line, column: editorRevealTarget.column }
+                            : null
+                        }
                         onChange={updateActiveTabContent}
                       />
                     </Suspense>
@@ -1166,6 +1503,9 @@ export function App() {
         <div className="statusbar-section">
           <CircleAlert size={14} />
           <span>{statusMessage}</span>
+        </div>
+        <div className="statusbar-section">
+          <span>{getFileSystemStatusText(connectionStatus.filesystemState)}</span>
         </div>
         <div className="statusbar-section">
           <span>{autoSaveEnabled ? 'Auto Save On' : 'Auto Save Off'}</span>
@@ -1227,6 +1567,102 @@ export function App() {
             void submitSavedConnectionRenameDialog();
           }}
         />
+      ) : null}
+
+      {searchDialogOpen ? (
+        <SearchDialog
+          isBusy={searchBusy}
+          query={searchQuery}
+          caseSensitive={searchCaseSensitive}
+          workspacePath={workspacePath}
+          groupedResults={groupedSearchResults}
+          resultCount={searchResults?.matches.length ?? 0}
+          truncated={searchResults?.truncated ?? false}
+          onChangeQuery={setSearchQuery}
+          onToggleCaseSensitive={setSearchCaseSensitive}
+          onClose={closeSearchDialog}
+          onRunSearch={() => {
+            void runSearch();
+          }}
+          onOpenMatch={(path, line, column) => {
+            void openFile(path, { line, column });
+          }}
+        />
+      ) : null}
+
+      {treeContextMenu ? (
+        <div
+          ref={treeContextMenuRef}
+          className="tree-context-menu"
+          style={{ left: treeContextMenu.x, top: treeContextMenu.y }}
+        >
+          {treeContextMenu.kind === 'directory' ? (
+            <>
+              <button
+                type="button"
+                className="tree-context-menu-item"
+                onClick={() => {
+                  handleTreeContextMenuAction('upload', treeContextMenu.path);
+                }}
+              >
+                <Upload size={14} />
+                <span>Upload Here</span>
+              </button>
+              <button
+                type="button"
+                className="tree-context-menu-item"
+                onClick={() => {
+                  handleTreeContextMenuAction('create-file', treeContextMenu.path);
+                }}
+              >
+                <Search size={14} />
+                <span>New File</span>
+              </button>
+              <button
+                type="button"
+                className="tree-context-menu-item"
+                onClick={() => {
+                  handleTreeContextMenuAction('create-folder', treeContextMenu.path);
+                }}
+              >
+                <Search size={14} />
+                <span>New Folder</span>
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              className="tree-context-menu-item"
+              onClick={() => {
+                handleTreeContextMenuAction('download', treeContextMenu.path);
+              }}
+            >
+              <Download size={14} />
+              <span>Download</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            className="tree-context-menu-item"
+            onClick={() => {
+              handleTreeContextMenuAction('rename', treeContextMenu.path);
+            }}
+          >
+            <PencilLine size={14} />
+            <span>Rename</span>
+          </button>
+          <button
+            type="button"
+            className="tree-context-menu-item tree-context-menu-item-danger"
+            onClick={() => {
+              handleTreeContextMenuAction('delete', treeContextMenu.path);
+            }}
+          >
+            <Trash2 size={14} />
+            <span>Delete</span>
+          </button>
+        </div>
       ) : null}
     </div>
   );

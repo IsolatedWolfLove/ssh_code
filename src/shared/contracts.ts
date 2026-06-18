@@ -1,15 +1,25 @@
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'error';
+export type AuthMethod = 'password' | 'privateKey' | 'agent';
+export type HostVerificationMode = 'knownHosts' | 'off';
+export type RemoteFileSystemState = 'idle' | 'loading' | 'ready' | 'error';
 
 export interface ConnectInput {
   host: string;
   port: number;
   username: string;
+  authMethod?: AuthMethod;
   password: string;
+  privateKeyPath?: string;
+  passphrase?: string;
+  agentSocket?: string;
+  hostVerification?: HostVerificationMode;
+  knownHostsPath?: string;
 }
 
 export interface ConnectResult {
   connectionId: string;
-  homeDir: string;
+  homeDir?: string;
+  filesystemState: RemoteFileSystemState;
   savedConnectionId?: string;
 }
 
@@ -19,6 +29,7 @@ export interface SavedConnectionSummary {
   host: string;
   port: number;
   username: string;
+  authMethod?: AuthMethod;
   lastConnectedAt: string;
   lastWorkspacePath?: string;
   workspacePaths: string[];
@@ -29,6 +40,8 @@ export interface ConnectionStatePayload {
   message: string;
   host?: string;
   connectionId?: string;
+  homeDir?: string;
+  filesystemState?: RemoteFileSystemState;
 }
 
 export interface RemoteDirectoryEntry {
@@ -65,6 +78,30 @@ export interface RenameRemoteEntryInput {
   nextName: string;
 }
 
+export interface DeleteRemoteEntryInput {
+  path: string;
+}
+
+export interface SearchRemoteFilesInput {
+  rootPath: string;
+  query: string;
+  caseSensitive: boolean;
+  maxResults?: number;
+}
+
+export interface SearchRemoteMatch {
+  path: string;
+  line: number;
+  column: number;
+  preview: string;
+}
+
+export interface SearchRemoteFilesResult {
+  query: string;
+  matches: SearchRemoteMatch[];
+  truncated: boolean;
+}
+
 export interface CreateTerminalResult {
   terminalId: string;
 }
@@ -99,6 +136,13 @@ export const IPC_CHANNELS = {
   writeFileAtomic: 'sftp:writeFileAtomic',
   createEntry: 'sftp:createEntry',
   renameEntry: 'sftp:renameEntry',
+  deleteEntry: 'sftp:deleteEntry',
+  uploadLocalEntries: 'sftp:uploadLocalEntries',
+  downloadEntry: 'sftp:downloadEntry',
+  searchInFiles: 'ssh:searchInFiles',
+  pickPrivateKeyPath: 'dialog:pickPrivateKeyPath',
+  pickKnownHostsPath: 'dialog:pickKnownHostsPath',
+  pickUploadEntries: 'dialog:pickUploadEntries',
   terminalCreate: 'terminal:create',
   terminalWrite: 'terminal:write',
   terminalResize: 'terminal:resize',

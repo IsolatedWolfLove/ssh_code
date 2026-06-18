@@ -67,6 +67,15 @@ function appendReplayEvent(replayLog: TerminalEvent[], event: TerminalEvent): vo
   }
 }
 
+function shouldLocalEcho(value: string): boolean {
+  if (value.length !== 1) {
+    return value === '\r';
+  }
+
+  const code = value.charCodeAt(0);
+  return code >= 0x20 && code !== 0x7f;
+}
+
 function TerminalInstance({
   active,
   onActivate,
@@ -78,6 +87,8 @@ function TerminalInstance({
   const fitAddonRef = useRef<FitAddon | null>(null);
   const readyRef = useRef(true);
   const terminalRef = useRef<Terminal | null>(null);
+  const pendingWriteRef = useRef('');
+  const pendingWriteFrameRef = useRef<number | null>(null);
   const [ready, setReady] = useState(true);
 
   useEffect(() => {
@@ -139,6 +150,10 @@ function TerminalInstance({
         return;
       }
 
+      if (shouldLocalEcho(value)) {
+        terminal.write(value === '\r' ? '\r\n' : value);
+      }
+
       void window.electronAPI.writeTerminal(sessionId, value);
     });
 
@@ -148,7 +163,17 @@ function TerminalInstance({
       }
 
       if (event.type === 'data') {
-        terminalRef.current.write(event.data);
+        pendingWriteRef.current += event.data;
+        if (pendingWriteFrameRef.current === null) {
+          pendingWriteFrameRef.current = window.requestAnimationFrame(() => {
+            pendingWriteFrameRef.current = null;
+            const output = pendingWriteRef.current;
+            pendingWriteRef.current = '';
+            if (output !== '') {
+              terminalRef.current?.write(output);
+            }
+          });
+        }
         return;
       }
 
@@ -170,6 +195,9 @@ function TerminalInstance({
     return () => {
       if (resizeFrame !== null) {
         window.cancelAnimationFrame(resizeFrame);
+      }
+      if (pendingWriteFrameRef.current !== null) {
+        window.cancelAnimationFrame(pendingWriteFrameRef.current);
       }
 
       unregisterSink();
@@ -298,7 +326,6 @@ export const TerminalPanel = memo(function TerminalPanel({
     setActiveTerminalId(null);
     setTerminals([]);
     setVisibleTerminalIds([]);
-    void openTerminal('new', true);
   }, [connectionStatus.connectionId, connectionStatus.state]);
 
   useEffect(() => {

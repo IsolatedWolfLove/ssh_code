@@ -20,6 +20,14 @@ const electronApi: ElectronApi = {
   writeFileAtomic: (input) => ipcRenderer.invoke(IPC_CHANNELS.writeFileAtomic, input),
   createEntry: (input) => ipcRenderer.invoke(IPC_CHANNELS.createEntry, input),
   renameEntry: (input) => ipcRenderer.invoke(IPC_CHANNELS.renameEntry, input),
+  deleteEntry: (input) => ipcRenderer.invoke(IPC_CHANNELS.deleteEntry, input),
+  uploadLocalEntries: (remotePath, localPaths) =>
+    ipcRenderer.invoke(IPC_CHANNELS.uploadLocalEntries, remotePath, localPaths),
+  downloadEntry: (remotePath) => ipcRenderer.invoke(IPC_CHANNELS.downloadEntry, remotePath),
+  searchInFiles: (input) => ipcRenderer.invoke(IPC_CHANNELS.searchInFiles, input),
+  pickPrivateKeyPath: () => ipcRenderer.invoke(IPC_CHANNELS.pickPrivateKeyPath),
+  pickKnownHostsPath: () => ipcRenderer.invoke(IPC_CHANNELS.pickKnownHostsPath),
+  pickUploadEntries: () => ipcRenderer.invoke(IPC_CHANNELS.pickUploadEntries),
   createTerminal: () => ipcRenderer.invoke(IPC_CHANNELS.terminalCreate),
   writeTerminal: (terminalId, data) => ipcRenderer.invoke(IPC_CHANNELS.terminalWrite, terminalId, data),
   resizeTerminal: (terminalId, cols, rows) =>

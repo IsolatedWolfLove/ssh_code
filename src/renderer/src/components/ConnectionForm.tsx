@@ -1,6 +1,7 @@
 import {
   ChevronDown,
   ChevronRight,
+  KeyRound,
   History,
   LoaderCircle,
   LogIn,
@@ -8,6 +9,7 @@ import {
   PlugZap,
   Power,
   RefreshCw,
+  ScanSearch,
   Trash2,
 } from 'lucide-react';
 import { type ChangeEvent, useState } from 'react';
@@ -80,6 +82,8 @@ export function ConnectionForm({
   const connected = status.state === 'connected';
   const actionLabel = connected ? 'Reconnect' : 'Connect';
   const ActionIcon = connected ? RefreshCw : PlugZap;
+  const authMethod = value.authMethod ?? 'password';
+  const hostVerification = value.hostVerification ?? 'off';
 
   function toggleSavedConnectionWorkspaces(savedConnectionId: string): void {
     setExpandedSavedConnectionIds((previous) => {
@@ -124,22 +128,123 @@ export function ConnectionForm({
         </label>
       </div>
 
-      <label>
-        <span>Password</span>
+      <div className="auth-choice-row">
+        <button
+          type="button"
+          className={`auth-choice-button ${authMethod === 'password' ? 'auth-choice-button-active' : ''}`}
+          onClick={() => {
+            onChange({ ...value, authMethod: 'password' });
+          }}
+        >
+          <PlugZap size={14} />
+          <span>Password</span>
+        </button>
+        <button
+          type="button"
+          className={`auth-choice-button ${authMethod === 'privateKey' ? 'auth-choice-button-active' : ''}`}
+          onClick={() => {
+            onChange({ ...value, authMethod: 'privateKey' });
+          }}
+        >
+          <KeyRound size={14} />
+          <span>SSH Key</span>
+        </button>
+        <button
+          type="button"
+          className={`auth-choice-button ${authMethod === 'agent' ? 'auth-choice-button-active' : ''}`}
+          onClick={() => {
+            onChange({ ...value, authMethod: 'agent' });
+          }}
+        >
+          <ScanSearch size={14} />
+          <span>Agent</span>
+        </button>
+      </div>
+
+      {authMethod === 'password' ? (
+        <label>
+          <span>Password</span>
+          <input
+            type="password"
+            value={value.password}
+            onChange={handleField('password')}
+            placeholder="SSH password"
+          />
+        </label>
+      ) : null}
+
+      {authMethod === 'privateKey' ? (
+        <>
+          <label>
+            <span>Private Key</span>
+            <input
+              value={value.privateKeyPath ?? ''}
+              onChange={handleField('privateKeyPath')}
+              placeholder="~/.ssh/id_ed25519"
+            />
+          </label>
+          <label>
+            <span>Passphrase</span>
+            <input
+              type="password"
+              value={value.passphrase ?? ''}
+              onChange={handleField('passphrase')}
+              placeholder="Optional key passphrase"
+            />
+          </label>
+        </>
+      ) : null}
+
+      {authMethod === 'agent' ? (
+        <label>
+          <span>Agent Socket</span>
+          <input
+            value={value.agentSocket ?? ''}
+            onChange={handleField('agentSocket')}
+            placeholder="/run/user/1000/ssh-agent.socket"
+          />
+        </label>
+      ) : null}
+
+      <label className="toggle-row connection-toggle-row">
         <input
-          type="password"
-          value={value.password}
-          onChange={handleField('password')}
-          placeholder="SSH password"
+          type="checkbox"
+          checked={hostVerification === 'knownHosts'}
+          onChange={(event) => {
+            onChange({
+              ...value,
+              hostVerification: event.target.checked ? 'knownHosts' : 'off',
+            });
+          }}
         />
+        <span>Verify host with known_hosts</span>
       </label>
+
+      {hostVerification === 'knownHosts' ? (
+        <label>
+          <span>known_hosts Path</span>
+          <input
+            value={value.knownHostsPath ?? ''}
+            onChange={handleField('knownHostsPath')}
+            placeholder="~/.ssh/known_hosts"
+          />
+        </label>
+      ) : null}
 
       <div className="connection-actions">
         <button
           type="button"
           className="primary-button"
           onClick={onConnect}
-          disabled={isBusy || value.host.trim() === '' || value.username.trim() === '' || value.password === ''}
+          disabled={
+            isBusy ||
+            value.host.trim() === '' ||
+            value.username.trim() === '' ||
+            (authMethod === 'password' && value.password === '') ||
+            (authMethod === 'privateKey' && (value.privateKeyPath ?? '').trim() === '') ||
+            (authMethod === 'agent' && (value.agentSocket ?? '').trim() === '') ||
+            (hostVerification === 'knownHosts' && (value.knownHostsPath ?? '').trim() === '')
+          }
         >
           {isBusy ? <LoaderCircle className="spin" size={16} /> : <ActionIcon size={16} />}
           <span>{actionLabel}</span>

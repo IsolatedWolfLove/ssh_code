@@ -11,6 +11,7 @@ const MAX_SAVED_CONNECTIONS = 12;
 const MAX_WORKSPACE_PATHS = 6;
 
 type PasswordEncoding = 'safeStorage' | 'plain';
+type OptionalSecretEncoding = PasswordEncoding | 'none';
 
 interface StoredSavedConnection {
   id: string;
@@ -18,8 +19,15 @@ interface StoredSavedConnection {
   host: string;
   port: number;
   username: string;
+  authMethod?: NonNullable<ConnectInput['authMethod']>;
   password: string;
-  passwordEncoding: PasswordEncoding;
+  passwordEncoding: OptionalSecretEncoding;
+  privateKeyPath?: string;
+  passphrase?: string;
+  passphraseEncoding?: OptionalSecretEncoding;
+  agentSocket?: string;
+  hostVerification?: NonNullable<ConnectInput['hostVerification']>;
+  knownHostsPath?: string;
   lastConnectedAt: string;
   lastWorkspacePath?: string;
   workspacePaths?: string[];
@@ -38,6 +46,10 @@ function isPasswordEncoding(value: unknown): value is PasswordEncoding {
   return value === 'safeStorage' || value === 'plain';
 }
 
+function isOptionalSecretEncoding(value: unknown): value is OptionalSecretEncoding {
+  return value === 'none' || isPasswordEncoding(value);
+}
+
 function isStoredSavedConnection(value: unknown): value is StoredSavedConnection {
   if (!isObject(value)) {
     return false;
@@ -50,8 +62,18 @@ function isStoredSavedConnection(value: unknown): value is StoredSavedConnection
     typeof value.port === 'number' &&
     Number.isFinite(value.port) &&
     typeof value.username === 'string' &&
+    (value.authMethod === undefined ||
+      value.authMethod === 'password' ||
+      value.authMethod === 'privateKey' ||
+      value.authMethod === 'agent') &&
     typeof value.password === 'string' &&
-    isPasswordEncoding(value.passwordEncoding) &&
+    isOptionalSecretEncoding(value.passwordEncoding) &&
+    (value.privateKeyPath === undefined || typeof value.privateKeyPath === 'string') &&
+    (value.passphrase === undefined || typeof value.passphrase === 'string') &&
+    (value.passphraseEncoding === undefined || isOptionalSecretEncoding(value.passphraseEncoding)) &&
+    (value.agentSocket === undefined || typeof value.agentSocket === 'string') &&
+    (value.hostVerification === undefined || value.hostVerification === 'knownHosts' || value.hostVerification === 'off') &&
+    (value.knownHostsPath === undefined || typeof value.knownHostsPath === 'string') &&
     typeof value.lastConnectedAt === 'string' &&
     (value.lastWorkspacePath === undefined || typeof value.lastWorkspacePath === 'string') &&
     (value.workspacePaths === undefined ||
@@ -122,6 +144,7 @@ function summarizeConnection(connection: StoredSavedConnection): SavedConnection
     host: connection.host,
     port: connection.port,
     username: connection.username,
+    authMethod: connection.authMethod ?? 'password',
     lastConnectedAt: connection.lastConnectedAt,
     lastWorkspacePath: getWorkspacePaths(connection)[0],
     workspacePaths: getWorkspacePaths(connection),
@@ -155,7 +178,13 @@ export class SavedConnectionStore {
       host: connection.host,
       port: connection.port,
       username: connection.username,
-      password: this.unprotectPassword(connection),
+      authMethod: connection.authMethod ?? 'password',
+      password: this.unprotectOptionalSecret(connection.password, connection.passwordEncoding),
+      privateKeyPath: connection.privateKeyPath ?? '',
+      passphrase: this.unprotectOptionalSecret(connection.passphrase ?? '', connection.passphraseEncoding ?? 'none'),
+      agentSocket: connection.agentSocket ?? '',
+      hostVerification: connection.hostVerification ?? 'off',
+      knownHostsPath: connection.knownHostsPath ?? '',
     };
   }
 
@@ -285,8 +314,9 @@ export class SavedConnectionStore {
   ): StoredSavedConnection {
     const host = input.host.trim();
     const username = input.username.trim();
-    const password = input.password;
-    const protectedPassword = this.protectPassword(password);
+    const authMethod = input.authMethod ?? 'password';
+    const protectedPassword = this.protectOptionalSecret(authMethod === 'password' ? input.password : '');
+    const protectedPassphrase = this.protectOptionalSecret(authMethod === 'privateKey' ? input.passphrase ?? '' : '');
 
     const workspacePaths = getWorkspacePaths(previousConnection ?? { workspacePaths: [] });
 
@@ -296,8 +326,15 @@ export class SavedConnectionStore {
       host,
       port: input.port,
       username,
+      authMethod,
       password: protectedPassword.value,
       passwordEncoding: protectedPassword.encoding,
+      privateKeyPath: authMethod === 'privateKey' ? input.privateKeyPath?.trim() ?? '' : '',
+      passphrase: protectedPassphrase.value,
+      passphraseEncoding: protectedPassphrase.encoding,
+      agentSocket: authMethod === 'agent' ? input.agentSocket?.trim() ?? '' : '',
+      hostVerification: input.hostVerification ?? 'off',
+      knownHostsPath: input.knownHostsPath?.trim() ?? '',
       lastConnectedAt,
       lastWorkspacePath: workspacePaths[0],
       workspacePaths,
@@ -318,10 +355,34 @@ export class SavedConnectionStore {
     };
   }
 
+  private protectOptionalSecret(secret: string): { encoding: OptionalSecretEncoding; value: string } {
+    if (secret === '') {
+      return {
+        encoding: 'none',
+        value: '',
+      };
+    }
+
+    return this.protectPassword(secret);
+  }
+
   private unprotectPassword(connection: StoredSavedConnection): string {
     const buffer = Buffer.from(connection.password, 'base64');
 
     if (connection.passwordEncoding === 'safeStorage') {
+      return safeStorage.decryptString(buffer);
+    }
+
+    return buffer.toString('utf8');
+  }
+
+  private unprotectOptionalSecret(value: string, encoding: OptionalSecretEncoding): string {
+    if (encoding === 'none' || value === '') {
+      return '';
+    }
+
+    const buffer = Buffer.from(value, 'base64');
+    if (encoding === 'safeStorage') {
       return safeStorage.decryptString(buffer);
     }
 
@@ -361,6 +422,8 @@ export class SavedConnectionStore {
         .filter(isStoredSavedConnection)
         .map((connection) => ({
           ...connection,
+          authMethod: connection.authMethod ?? 'password',
+          hostVerification: connection.hostVerification ?? 'off',
           displayName: normalizeDisplayName(connection.displayName, connection),
           workspacePaths: getWorkspacePaths(connection),
           lastWorkspacePath: getWorkspacePaths(connection)[0],

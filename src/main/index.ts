@@ -1,14 +1,16 @@
 import path from 'node:path';
 import { accessSync, constants, existsSync, readdirSync } from 'node:fs';
 
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 
 import { IPC_CHANNELS } from '../shared/contracts';
 import type {
   ConnectInput,
   CreateRemoteEntryInput,
+  DeleteRemoteEntryInput,
   RenameRemoteEntryInput,
   SaveRemoteFileInput,
+  SearchRemoteFilesInput,
 } from '../shared/contracts';
 import { SavedConnectionStore } from './saved-connections';
 import { SshSessionManager } from './ssh-session';
@@ -59,6 +61,10 @@ function shouldDisableHardwareAcceleration(): boolean {
     return false;
   }
 
+  if (process.env.SSH_STUDIO_AUTO_DISABLE_GPU !== '0') {
+    return true;
+  }
+
   if (process.env.SSH_STUDIO_FORCE_GPU === '1') {
     return false;
   }
@@ -73,6 +79,10 @@ function shouldDisableHardwareAcceleration(): boolean {
 if (shouldDisableHardwareAcceleration()) {
   app.disableHardwareAcceleration();
 }
+
+process.on('unhandledRejection', (error) => {
+  console.error('Unhandled promise rejection in main process', error);
+});
 
 function resolvePreloadPath(): string {
   const mjsPath = path.join(__dirname, '../preload/index.mjs');
@@ -176,6 +186,15 @@ function getSavedConnectionStore(): SavedConnectionStore {
   return savedConnectionStore;
 }
 
+function getBrowserWindow(webContentsId: number): BrowserWindow {
+  const session = windowSessions.get(webContentsId);
+  if (!session) {
+    throw new Error('No active window session');
+  }
+
+  return session.window;
+}
+
 function registerIpc(): void {
   if (ipcRegistered) {
     return;
@@ -238,6 +257,66 @@ function registerIpc(): void {
   ipcMain.handle(IPC_CHANNELS.renameEntry, (event, input: RenameRemoteEntryInput) =>
     getSessionManager(event.sender.id).renameEntry(input),
   );
+  ipcMain.handle(IPC_CHANNELS.deleteEntry, (event, input: DeleteRemoteEntryInput) =>
+    getSessionManager(event.sender.id).deleteEntry(input),
+  );
+  ipcMain.handle(IPC_CHANNELS.uploadLocalEntries, async (event, remotePath: string, localPaths?: string[]) => {
+    const resolvedLocalPaths =
+      localPaths && localPaths.length > 0
+        ? localPaths
+        : (
+            await dialog.showOpenDialog(getBrowserWindow(event.sender.id), {
+              properties: ['openFile', 'openDirectory', 'multiSelections'],
+              title: 'Upload to remote folder',
+            })
+          ).filePaths;
+
+    if (resolvedLocalPaths.length === 0) {
+      return;
+    }
+
+    await getSessionManager(event.sender.id).uploadLocalEntries(resolvedLocalPaths, remotePath);
+  });
+  ipcMain.handle(IPC_CHANNELS.downloadEntry, async (event, remotePath: string) => {
+    const result = await dialog.showOpenDialog(getBrowserWindow(event.sender.id), {
+      title: 'Choose download folder',
+      defaultPath: app.getPath('downloads'),
+      properties: ['openDirectory', 'createDirectory'],
+    });
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return;
+    }
+
+    await getSessionManager(event.sender.id).downloadEntry(
+      remotePath,
+      path.join(result.filePaths[0], path.basename(remotePath)),
+    );
+  });
+  ipcMain.handle(IPC_CHANNELS.searchInFiles, (event, input: SearchRemoteFilesInput) =>
+    getSessionManager(event.sender.id).searchInFiles(input),
+  );
+  ipcMain.handle(IPC_CHANNELS.pickPrivateKeyPath, async (event) => {
+    const result = await dialog.showOpenDialog(getBrowserWindow(event.sender.id), {
+      title: 'Select private key',
+      properties: ['openFile'],
+    });
+    return result.canceled ? null : (result.filePaths[0] ?? null);
+  });
+  ipcMain.handle(IPC_CHANNELS.pickKnownHostsPath, async (event) => {
+    const result = await dialog.showOpenDialog(getBrowserWindow(event.sender.id), {
+      title: 'Select known_hosts file',
+      properties: ['openFile'],
+    });
+    return result.canceled ? null : (result.filePaths[0] ?? null);
+  });
+  ipcMain.handle(IPC_CHANNELS.pickUploadEntries, async (event) => {
+    const result = await dialog.showOpenDialog(getBrowserWindow(event.sender.id), {
+      title: 'Select files or folders to upload',
+      properties: ['openFile', 'openDirectory', 'multiSelections'],
+    });
+    return result.canceled ? [] : result.filePaths;
+  });
   ipcMain.handle(IPC_CHANNELS.terminalCreate, (event) => getSessionManager(event.sender.id).createTerminal());
   ipcMain.handle(IPC_CHANNELS.terminalWrite, (event, terminalId: string, data: string) =>
     getSessionManager(event.sender.id).writeTerminal(terminalId, data),

@@ -49,6 +49,11 @@ interface ConnectionManagerState {
   auxiliaryFailureReason: string | null;
 }
 
+interface TerminalSession {
+  client: SshClient;
+  channel: ClientChannel;
+}
+
 function isDirectory(mode?: number): boolean {
   return typeof mode === 'number' && (mode & TYPE_MASK) === DIRECTORY_MASK;
 }
@@ -176,7 +181,7 @@ export class SshSessionManager {
     auxiliaryState: 'idle',
     auxiliaryFailureReason: null,
   };
-  private terminals = new Map<string, ClientChannel>();
+  private terminals = new Map<string, TerminalSession>();
   private terminalOutputBuffers = new Map<string, BufferedTerminalOutput>();
   private connectionId: string | null = null;
   private host: string | null = null;
@@ -291,8 +296,7 @@ export class SshSessionManager {
     }
     this.terminalOutputBuffers.clear();
     for (const terminal of terminals) {
-      terminal.removeAllListeners();
-      terminal.end();
+      this.destroyTerminalSession(terminal);
     }
 
     const interactiveClient = this.interactiveClient;
@@ -622,39 +626,43 @@ export class SshSessionManager {
   }
 
   async createTerminal(): Promise<CreateTerminalResult> {
-    const client = this.requireInteractiveClient();
+    if (!this.interactiveClient || !this.connectionId) {
+      throw new Error('No active SSH connection');
+    }
+
+    const config = this.buildCurrentConnectConfigSnapshot();
+    if (!config) {
+      throw new Error('No active SSH connection');
+    }
+
     const terminalId = randomUUID();
+    const client = await this.createConnectedClient(config);
 
-    const terminal = await new Promise<ClientChannel>((resolve, reject) => {
-      client.shell(
-        {
-          term: 'xterm-256color',
-          cols: 120,
-          rows: 32,
-        },
-        (error: Error | undefined, stream: ClientChannel) => {
-          if (error) {
-            reject(error);
-            return;
-          }
+    if (!this.interactiveClient || !this.connectionId || this.isClosing) {
+      client.removeAllListeners();
+      client.end();
+      throw new Error('No active SSH connection');
+    }
 
-          resolve(stream);
-        },
-      );
-    });
+    let terminal: ClientChannel;
+    try {
+      terminal = await this.createTerminalChannel(client);
+    } catch (error) {
+      this.closeTerminalClient(client);
+      throw error;
+    }
 
-    this.terminals.set(terminalId, terminal);
+    const session: TerminalSession = { client, channel: terminal };
+
+    if (!this.interactiveClient || !this.connectionId || this.isClosing) {
+      this.destroyTerminalSession(session);
+      throw new Error('No active SSH connection');
+    }
+
+    this.terminals.set(terminalId, session);
 
     terminal.on('data', (chunk: Buffer | string) => {
-      if (this.terminals.get(terminalId) !== terminal) {
-        return;
-      }
-
-      this.bufferTerminalOutput(terminalId, typeof chunk === 'string' ? chunk : chunk.toString('utf8'));
-    });
-
-    terminal.stderr.on('data', (chunk: Buffer | string) => {
-      if (this.terminals.get(terminalId) !== terminal) {
+      if (this.terminals.get(terminalId) !== session) {
         return;
       }
 
@@ -662,7 +670,35 @@ export class SshSessionManager {
     });
 
     terminal.on('close', () => {
-      if (this.terminals.get(terminalId) !== terminal) {
+      if (this.terminals.get(terminalId) !== session) {
+        return;
+      }
+
+      this.flushTerminalOutput(terminalId);
+      this.terminals.delete(terminalId);
+      this.closeTerminalClient(session.client);
+
+      this.emitTerminalEvent({
+        type: 'exit',
+        terminalId,
+      });
+    });
+
+    terminal.on('error', (error: Error) => {
+      if (this.terminals.get(terminalId) !== session) {
+        return;
+      }
+
+      this.flushTerminalOutput(terminalId);
+      this.emitTerminalEvent({
+        type: 'error',
+        terminalId,
+        message: getErrorMessage(error, 'Terminal session error'),
+      });
+    });
+
+    client.on('close', () => {
+      if (this.terminals.get(terminalId) !== session) {
         return;
       }
 
@@ -675,8 +711,22 @@ export class SshSessionManager {
       });
     });
 
-    terminal.on('error', (error: Error) => {
-      if (this.terminals.get(terminalId) !== terminal) {
+    client.on('end', () => {
+      if (this.terminals.get(terminalId) !== session) {
+        return;
+      }
+
+      this.flushTerminalOutput(terminalId);
+      this.terminals.delete(terminalId);
+
+      this.emitTerminalEvent({
+        type: 'exit',
+        terminalId,
+      });
+    });
+
+    client.on('error', (error: Error) => {
+      if (this.terminals.get(terminalId) !== session) {
         return;
       }
 
@@ -684,7 +734,7 @@ export class SshSessionManager {
       this.emitTerminalEvent({
         type: 'error',
         terminalId,
-        message: getErrorMessage(error, 'Terminal session error'),
+        message: getErrorMessage(error, 'Terminal SSH connection error'),
       });
     });
 
@@ -709,12 +759,50 @@ export class SshSessionManager {
       return;
     }
 
-    terminal.removeAllListeners();
-    terminal.end();
+    this.destroyTerminalSession(terminal);
     this.emitTerminalEvent({
       type: 'exit',
       terminalId,
     });
+  }
+
+  private async createTerminalChannel(client: SshClient): Promise<ClientChannel> {
+    return new Promise<ClientChannel>((resolve, reject) => {
+      client.shell(
+        {
+          term: 'xterm-256color',
+          cols: 120,
+          rows: 32,
+        },
+        (error: Error | undefined, stream: ClientChannel) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+
+          resolve(stream);
+        },
+      );
+    });
+  }
+
+  private destroyTerminalSession(terminal: TerminalSession): void {
+    this.destroyTerminalChannel(terminal.channel);
+    this.closeTerminalClient(terminal.client);
+  }
+
+  private closeTerminalClient(client: SshClient): void {
+    client.removeAllListeners();
+    client.on('error', () => undefined);
+    client.end();
+  }
+
+  private destroyTerminalChannel(terminal: ClientChannel): void {
+    terminal.removeAllListeners();
+    terminal.stderr.removeAllListeners();
+    terminal.on('error', () => undefined);
+    terminal.stderr.on('error', () => undefined);
+    terminal.destroy();
   }
 
   private emitConnectionState(payload: ConnectionStatePayload): void {
@@ -747,7 +835,7 @@ export class SshSessionManager {
   }
 
   private requireTerminal(terminalId: string): ClientChannel {
-    const terminal = this.terminals.get(terminalId);
+    const terminal = this.terminals.get(terminalId)?.channel;
     if (!terminal) {
       throw new Error('No active terminal session');
     }
@@ -1615,8 +1703,8 @@ export class SshSessionManager {
       return;
     }
 
-    const terminalIds = [...this.terminals.keys()];
-    for (const terminalId of terminalIds) {
+    const terminalEntries = [...this.terminals.entries()];
+    for (const [terminalId] of terminalEntries) {
       this.flushTerminalOutput(terminalId);
     }
     this.interactiveClient = null;
@@ -1630,6 +1718,9 @@ export class SshSessionManager {
     this.auxiliarySftp = null;
     this.auxiliaryAttempted = false;
     this.terminals.clear();
+    for (const [, terminal] of terminalEntries) {
+      this.destroyTerminalSession(terminal);
+    }
     this.homeDir = null;
     this.directoryCache.clear();
 
@@ -1641,7 +1732,7 @@ export class SshSessionManager {
       filesystemState: 'idle',
     });
 
-    for (const terminalId of terminalIds) {
+    for (const [terminalId] of terminalEntries) {
       this.emitTerminalEvent({
         type: 'exit',
         terminalId,

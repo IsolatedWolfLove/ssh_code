@@ -1,15 +1,21 @@
-import { Columns2, MonitorCog, Plus, X } from 'lucide-react';
+import { Columns2, Plus, X } from 'lucide-react';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
-import { Fragment, memo, useCallback, useEffect, useRef, useState } from 'react';
+import { Fragment, forwardRef, memo, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
+import type { ForwardedRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 
 import type { ConnectionStatePayload, TerminalEvent } from '../../../shared/contracts';
+import { getScaledFontSize, useWindowFontScale } from '../window-font-scale';
 
 interface TerminalPanelProps {
   connectionStatus: ConnectionStatePayload;
   workspacePath: string;
   onStatusMessage: (message: string) => void;
+}
+
+export interface TerminalPanelHandle {
+  runCommand: (command: string, label?: string) => Promise<void>;
 }
 
 interface TerminalSessionItem {
@@ -26,7 +32,6 @@ interface RegisteredTerminalSink {
 }
 
 const MAX_REPLAY_EVENTS_PER_TERMINAL = 2000;
-
 interface TerminalInstanceProps {
   active: boolean;
   onActivate: () => void;
@@ -67,13 +72,15 @@ function appendReplayEvent(replayLog: TerminalEvent[], event: TerminalEvent): vo
   }
 }
 
-function shouldLocalEcho(value: string): boolean {
-  if (value.length !== 1) {
-    return value === '\r';
-  }
-
-  const code = value.charCodeAt(0);
-  return code >= 0x20 && code !== 0x7f;
+function shouldUseTextInputEvent(event: KeyboardEvent): boolean {
+  return (
+    event.type === 'keydown' &&
+    event.key.length === 1 &&
+    !event.ctrlKey &&
+    !event.altKey &&
+    !event.metaKey &&
+    !event.isComposing
+  );
 }
 
 function TerminalInstance({
@@ -85,6 +92,7 @@ function TerminalInstance({
 }: TerminalInstanceProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const fontScale = useWindowFontScale();
   const readyRef = useRef(true);
   const terminalRef = useRef<Terminal | null>(null);
   const pendingWriteRef = useRef('');
@@ -95,7 +103,7 @@ function TerminalInstance({
     const terminal = new Terminal({
       cursorBlink: true,
       fontFamily: '"IBM Plex Mono", "JetBrains Mono", monospace',
-      fontSize: 13,
+      fontSize: getScaledFontSize(13),
       theme: {
         background: '#0b1017',
         foreground: '#dbe7f2',
@@ -105,6 +113,15 @@ function TerminalInstance({
       },
       convertEol: true,
       scrollback: 6000,
+    });
+
+    terminal.attachCustomKeyEventHandler((event) => {
+      // Avoid sending printable keys from both keydown and text-input events in Electron.
+      if (shouldUseTextInputEvent(event)) {
+        return false;
+      }
+
+      return true;
     });
 
     const fitAddon = new FitAddon();
@@ -148,10 +165,6 @@ function TerminalInstance({
     const terminalDataDisposable = terminal.onData((value) => {
       if (!readyRef.current) {
         return;
-      }
-
-      if (shouldLocalEcho(value)) {
-        terminal.write(value === '\r' ? '\r\n' : value);
       }
 
       void window.electronAPI.writeTerminal(sessionId, value);
@@ -210,6 +223,21 @@ function TerminalInstance({
   }, [onStatusMessage, registerSink, sessionId]);
 
   useEffect(() => {
+    const terminal = terminalRef.current;
+    const fitAddon = fitAddonRef.current;
+    if (!terminal || !fitAddon) {
+      return;
+    }
+
+    terminal.options.fontSize = getScaledFontSize(13, fontScale);
+    fitAddon.fit();
+
+    if (readyRef.current) {
+      void window.electronAPI.resizeTerminal(sessionId, terminal.cols, terminal.rows);
+    }
+  }, [fontScale, sessionId]);
+
+  useEffect(() => {
     if (!active) {
       return;
     }
@@ -233,11 +261,11 @@ function TerminalInstance({
   );
 }
 
-export const TerminalPanel = memo(function TerminalPanel({
+function TerminalPanelComponent({
   connectionStatus,
   workspacePath,
   onStatusMessage,
-}: TerminalPanelProps) {
+}: TerminalPanelProps, ref: ForwardedRef<TerminalPanelHandle>) {
   const [activeTerminalId, setActiveTerminalId] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<'creating' | 'splitting' | null>(null);
   const [terminals, setTerminals] = useState<TerminalSessionItem[]>([]);
@@ -399,10 +427,10 @@ export const TerminalPanel = memo(function TerminalPanel({
     setActiveTerminalId(nextActiveId);
   }
 
-  async function openTerminal(mode: 'new' | 'split', silent = false): Promise<void> {
+  async function openTerminal(mode: 'new' | 'split', silent = false, labelOverride?: string): Promise<string | null> {
     if (connectionStatus.state !== 'connected' || !connectionStatus.connectionId) {
       onStatusMessage('Connect before opening a terminal');
-      return;
+      return null;
     }
 
     const expectedConnectionId = connectionStatus.connectionId;
@@ -415,10 +443,11 @@ export const TerminalPanel = memo(function TerminalPanel({
         void window.electronAPI.closeTerminal(result.terminalId).catch(() => {
           // Ignore stale terminal cleanup failures after a reconnect.
         });
-        return;
+        return null;
       }
 
-      const label = `Terminal ${nextTerminalNumberRef.current}`;
+      const normalizedLabel = labelOverride?.trim();
+      const label = normalizedLabel ? normalizedLabel.slice(0, 48) : `Terminal ${nextTerminalNumberRef.current}`;
       nextTerminalNumberRef.current += 1;
       const nextTerminal = {
         id: result.terminalId,
@@ -448,12 +477,50 @@ export const TerminalPanel = memo(function TerminalPanel({
       if (!silent) {
         onStatusMessage(`Opened ${label}`);
       }
+      return result.terminalId;
     } catch (error) {
       onStatusMessage(getErrorMessage(error, 'Unable to start terminal'));
+      return null;
     } finally {
       setBusyAction(null);
     }
   }
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      async runCommand(command: string, label?: string): Promise<void> {
+        const normalizedCommand = command.trim();
+        if (normalizedCommand === '') {
+          onStatusMessage('Command is empty');
+          return;
+        }
+
+        const terminalId = await openTerminal('new', true, label);
+        if (!terminalId) {
+          return;
+        }
+
+        const normalizedWorkspacePath = workspacePath.trim();
+        const commandText =
+          normalizedWorkspacePath === ''
+            ? `${normalizedCommand}\n`
+            : `cd -- ${shellEscape(normalizedWorkspacePath)}\n${normalizedCommand}\n`;
+
+        if (normalizedWorkspacePath !== '') {
+          syncedPathsRef.current.set(terminalId, normalizedWorkspacePath);
+        }
+
+        try {
+          await window.electronAPI.writeTerminal(terminalId, commandText);
+          onStatusMessage(`Running ${label?.trim() || normalizedCommand}`);
+        } catch (error) {
+          onStatusMessage(getErrorMessage(error, 'Unable to run command'));
+        }
+      },
+    }),
+    [connectionStatus.connectionId, connectionStatus.state, onStatusMessage, workspacePath],
+  );
 
   async function closeTerminal(terminalId: string): Promise<void> {
     const terminal = terminalsRef.current.find((item) => item.id === terminalId);
@@ -489,14 +556,53 @@ export const TerminalPanel = memo(function TerminalPanel({
 
   return (
     <section className="terminal-panel">
-      <div className="terminal-header">
-        <div className="section-heading">
+      <div className="terminal-bar">
+        <div className="terminal-summary">
           <span>Terminal</span>
-          <span className="terminal-caption">
-            <MonitorCog size={14} />
+          <span>
             {isConnected ? `${terminals.length} shell${terminals.length === 1 ? '' : 's'}` : 'Waiting for connection'}
           </span>
         </div>
+
+        {terminals.length > 0 ? (
+          <div className="terminal-tab-strip">
+            {terminals.map((terminal) => {
+              const isActive = terminal.id === activeTerminalId;
+              const isVisible = visibleTerminalIds.includes(terminal.id);
+
+              return (
+                <div
+                  key={terminal.id}
+                  className={`terminal-tab ${isActive ? 'terminal-tab-active' : ''} ${isVisible ? 'terminal-tab-visible' : ''}`}
+                >
+                  <button
+                    type="button"
+                    className="terminal-tab-main"
+                    title={terminal.label}
+                    onClick={() => {
+                      revealTerminal(terminal.id);
+                    }}
+                  >
+                    <span className="terminal-tab-name">{terminal.label}</span>
+                    {isVisible && visibleTerminalIds.length > 1 ? (
+                      <span className="terminal-tab-badge">Split</span>
+                    ) : null}
+                  </button>
+                  <button
+                    type="button"
+                    className="terminal-tab-close"
+                    title={`Close ${terminal.label}`}
+                    onClick={() => {
+                      void closeTerminal(terminal.id);
+                    }}
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        ) : null}
 
         <div className="terminal-toolbar">
           <button
@@ -523,46 +629,6 @@ export const TerminalPanel = memo(function TerminalPanel({
           </button>
         </div>
       </div>
-
-      {terminals.length > 0 ? (
-        <div className="terminal-tab-strip">
-          {terminals.map((terminal) => {
-            const isActive = terminal.id === activeTerminalId;
-            const isVisible = visibleTerminalIds.includes(terminal.id);
-
-            return (
-              <div
-                key={terminal.id}
-                className={`terminal-tab ${isActive ? 'terminal-tab-active' : ''} ${isVisible ? 'terminal-tab-visible' : ''}`}
-              >
-                <button
-                  type="button"
-                  className="terminal-tab-main"
-                  title={terminal.label}
-                  onClick={() => {
-                    revealTerminal(terminal.id);
-                  }}
-                >
-                  <span className="terminal-tab-name">{terminal.label}</span>
-                  {isVisible && visibleTerminalIds.length > 1 ? (
-                    <span className="terminal-tab-badge">Split</span>
-                  ) : null}
-                </button>
-                <button
-                  type="button"
-                  className="terminal-tab-close"
-                  title={`Close ${terminal.label}`}
-                  onClick={() => {
-                    void closeTerminal(terminal.id);
-                  }}
-                >
-                  <X size={13} />
-                </button>
-              </div>
-            );
-          })}
-        </div>
-      ) : null}
 
       {visibleTerminals.length === 0 ? (
         <div className="terminal-empty">
@@ -621,4 +687,6 @@ export const TerminalPanel = memo(function TerminalPanel({
       )}
     </section>
   );
-});
+}
+
+export const TerminalPanel = memo(forwardRef<TerminalPanelHandle, TerminalPanelProps>(TerminalPanelComponent));

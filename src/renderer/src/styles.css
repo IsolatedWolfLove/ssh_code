@@ -1,6 +1,8 @@
 :root {
   color-scheme: dark;
   font-family: "IBM Plex Sans", "Segoe UI", "Noto Sans", sans-serif;
+  font-size: 16px;
+  --font-scale: 1;
   --bg-app: #0c1016;
   --bg-panel: #10151d;
   --bg-panel-elevated: #141b24;
@@ -83,7 +85,7 @@ button {
 
 .menu-bar-center {
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 0.75rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -95,7 +97,7 @@ button {
 }
 
 .product-name {
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 600;
   line-height: 1.2;
 }
@@ -110,7 +112,7 @@ button {
   border-radius: 4px;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .menu-button:hover,
@@ -147,7 +149,7 @@ button {
   border-radius: 6px;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 0.75rem;
   text-align: left;
 }
 
@@ -176,7 +178,7 @@ button {
 
 .status-text {
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 0.75rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -242,7 +244,7 @@ button {
 
 .connection-copy h1 {
   margin: 0;
-  font-size: 28px;
+  font-size: 1.75rem;
   line-height: 1.1;
   color: var(--text-primary);
 }
@@ -258,7 +260,7 @@ button {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  font-size: 12px;
+  font-size: 0.75rem;
   text-transform: uppercase;
   letter-spacing: 0;
   color: var(--text-muted);
@@ -271,7 +273,7 @@ button {
   height: 24px;
   padding: 0 10px;
   border-radius: 999px;
-  font-size: 11px;
+  font-size: 0.6875rem;
   text-transform: capitalize;
   border: 1px solid transparent;
 }
@@ -299,7 +301,7 @@ button {
   display: grid;
   gap: 6px;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .field-row {
@@ -354,14 +356,14 @@ button {
 
 .dialog-header h2 {
   margin: 0;
-  font-size: 20px;
+  font-size: 1.25rem;
   line-height: 1.2;
 }
 
 .dialog-header p {
   margin: 8px 0 0;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 1.5;
   word-break: break-all;
 }
@@ -380,7 +382,7 @@ button {
   display: grid;
   gap: 6px;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .dialog-field input {
@@ -393,7 +395,24 @@ button {
   outline: none;
 }
 
+.dialog-field textarea {
+  min-height: 88px;
+  resize: vertical;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: rgba(13, 19, 27, 0.92);
+  color: var(--text-primary);
+  outline: none;
+  font: 0.8125rem/1.45 "IBM Plex Mono", "JetBrains Mono", monospace;
+}
+
 .dialog-field input:focus {
+  border-color: rgba(55, 210, 200, 0.6);
+  box-shadow: 0 0 0 3px rgba(55, 210, 200, 0.12);
+}
+
+.dialog-field textarea:focus {
   border-color: rgba(55, 210, 200, 0.6);
   box-shadow: 0 0 0 3px rgba(55, 210, 200, 0.12);
 }
@@ -518,7 +537,7 @@ button {
   min-height: 90px;
   padding: 12px;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .folder-picker-error {
@@ -537,7 +556,7 @@ button {
   border-radius: var(--radius);
   background: rgba(255, 255, 255, 0.03);
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .folder-picker-selection span {
@@ -571,7 +590,7 @@ button {
   min-height: 56px;
   padding: 0 2px;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 1.5;
 }
 
@@ -622,12 +641,12 @@ button {
 }
 
 .saved-connection-copy strong {
-  font-size: 14px;
+  font-size: 0.875rem;
 }
 
 .saved-connection-copy span {
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .saved-connection-button-label {
@@ -636,7 +655,7 @@ button {
   gap: 8px;
   flex: none;
   color: var(--accent);
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 600;
 }
 
@@ -657,7 +676,7 @@ button {
 
 .saved-workspace-toggle strong {
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .saved-workspace-list {
@@ -694,12 +713,12 @@ button {
 
 .saved-workspace-chip span {
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 0.6875rem;
   text-transform: uppercase;
 }
 
 .saved-workspace-chip strong {
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 600;
 }
 
@@ -811,7 +830,7 @@ button {
   gap: 8px;
   min-width: 0;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .search-toggle-row {
@@ -843,7 +862,7 @@ button {
 .search-result-group-title {
   padding: 4px 6px;
   color: var(--text-primary);
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -875,11 +894,11 @@ button {
 
 .search-result-meta {
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 0.6875rem;
 }
 
 .search-result-preview {
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .search-empty {
@@ -887,7 +906,118 @@ button {
   place-items: center;
   min-height: 72px;
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 0.75rem;
+}
+
+.quick-command-dialog-card {
+  display: grid;
+  grid-template-rows: auto minmax(180px, 42vh) auto;
+  gap: 14px;
+  width: min(760px, 100%);
+}
+
+.quick-command-list {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-height: 0;
+  overflow: auto;
+  padding: 4px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.quick-command-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.quick-command-run {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  min-height: 48px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-secondary);
+  text-align: left;
+}
+
+.quick-command-run:hover:not(:disabled) {
+  border-color: rgba(55, 210, 200, 0.28);
+  background: rgba(55, 210, 200, 0.08);
+  color: var(--text-primary);
+}
+
+.quick-command-run:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.quick-command-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.quick-command-copy strong,
+.quick-command-copy span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quick-command-copy strong {
+  color: var(--text-primary);
+  font-size: 0.8125rem;
+}
+
+.quick-command-copy span {
+  color: var(--text-muted);
+  font: 0.75rem/1.3 "IBM Plex Mono", "JetBrains Mono", monospace;
+}
+
+.quick-command-delete {
+  align-self: stretch;
+  width: 38px;
+  height: auto;
+  border: 1px solid var(--line-soft);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.quick-command-delete:hover {
+  color: var(--danger);
+  border-color: rgba(255, 120, 110, 0.28);
+  background: rgba(255, 120, 110, 0.08);
+}
+
+.quick-command-empty {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 10px;
+  min-height: 148px;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.quick-command-form {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.55fr) minmax(220px, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+}
+
+.quick-command-add {
+  flex: none;
+  white-space: nowrap;
 }
 
 @media (max-width: 900px) {
@@ -902,6 +1032,14 @@ button {
 
   .search-dialog-summary {
     justify-content: flex-start;
+  }
+
+  .quick-command-dialog-card {
+    grid-template-rows: auto minmax(180px, 38vh) auto;
+  }
+
+  .quick-command-form {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -980,7 +1118,7 @@ button {
   align-items: center;
   gap: 8px;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .toggle-row input {
@@ -1026,7 +1164,7 @@ button {
 }
 
 .tree-root-label {
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1058,7 +1196,7 @@ button {
 }
 
 .tree-workspace-name {
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--text-primary);
 }
 
@@ -1082,7 +1220,7 @@ button {
   align-items: center;
   gap: 8px;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .tree-node {
@@ -1255,12 +1393,12 @@ button {
   border-radius: 999px;
   background: rgba(255, 179, 71, 0.16);
   color: #ffd695;
-  font-size: 11px;
+  font-size: 0.6875rem;
   flex: none;
 }
 
 .tab-saving {
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--text-muted);
   flex: none;
 }
@@ -1293,7 +1431,7 @@ button {
 
 .editor-empty h2 {
   margin: 0;
-  font-size: 18px;
+  font-size: 1.125rem;
   color: var(--text-primary);
 }
 
@@ -1314,24 +1452,33 @@ button {
 
 .terminal-panel {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
-  gap: 10px;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 6px;
+  padding: 8px;
   background: linear-gradient(180deg, rgba(11, 16, 23, 0.96), rgba(6, 10, 15, 0.92));
 }
 
-.terminal-header {
-  display: flex;
+.terminal-bar {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
+  min-height: 32px;
 }
 
-.terminal-caption {
+.terminal-summary {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.terminal-summary span:last-child {
   color: var(--text-secondary);
-  font-size: 12px;
   text-transform: none;
 }
 
@@ -1348,10 +1495,10 @@ button {
 
 .terminal-tab-strip {
   display: flex;
-  align-items: stretch;
-  gap: 8px;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
   overflow-x: auto;
-  padding-bottom: 2px;
 }
 
 .terminal-tab {
@@ -1383,11 +1530,11 @@ button {
 .terminal-tab-main {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
   flex: 1;
-  padding: 0 10px;
-  height: 32px;
+  padding: 0 9px;
+  height: 28px;
   color: var(--text-secondary);
 }
 
@@ -1404,11 +1551,11 @@ button {
 
 .terminal-tab-badge {
   flex: none;
-  padding: 2px 6px;
+  padding: 1px 5px;
   border-radius: 999px;
   background: rgba(55, 210, 200, 0.14);
   color: #9cf7f0;
-  font-size: 10px;
+  font-size: 0.625rem;
   font-weight: 600;
   text-transform: uppercase;
 }
@@ -1417,8 +1564,8 @@ button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: 26px;
+  height: 26px;
   margin-right: 2px;
   border-radius: 6px;
   color: var(--text-muted);
@@ -1495,7 +1642,7 @@ button {
   border-radius: 999px;
   background: rgba(255, 120, 110, 0.12);
   color: #ffb7b0;
-  font-size: 11px;
+  font-size: 0.6875rem;
 }
 
 .statusbar {
@@ -1507,7 +1654,7 @@ button {
   border-top: 1px solid var(--line-soft);
   background: rgba(7, 11, 17, 0.94);
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .statusbar-section {

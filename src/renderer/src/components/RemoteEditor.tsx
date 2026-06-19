@@ -5,6 +5,7 @@ import { useEffect, useRef } from 'react';
 
 import type { EditorTabItem } from './EditorTabs';
 import { monaco } from '../monaco';
+import { getScaledFontSize, useWindowFontScale } from '../window-font-scale';
 
 interface RemoteEditorProps {
   isLoadingFile: boolean;
@@ -17,7 +18,7 @@ interface RemoteEditorProps {
 const EDITOR_OPTIONS = {
   automaticLayout: true,
   fontFamily: '"IBM Plex Mono", "JetBrains Mono", monospace',
-  fontSize: 13,
+  fontSize: getScaledFontSize(13),
   minimap: { enabled: false },
   scrollBeyondLastLine: false,
   smoothScrolling: true,
@@ -50,6 +51,7 @@ const handleMount: OnMount = (editor) => {
 
 export function RemoteEditor({ isLoadingFile, language, tab, revealTarget, onChange }: RemoteEditorProps) {
   const editorRef = useRef<MonacoEditor.editor.IStandaloneCodeEditor | null>(null);
+  const fontScale = useWindowFontScale();
 
   const handleEditorMount: OnMount = (editor, monacoInstance) => {
     editorRef.current = editor;
@@ -69,6 +71,10 @@ export function RemoteEditor({ isLoadingFile, language, tab, revealTarget, onCha
     editor.revealLineInCenter(revealTarget.line);
     editor.focus();
   }, [revealTarget, tab.id]);
+
+  useEffect(() => {
+    editorRef.current?.updateOptions({ fontSize: getScaledFontSize(13, fontScale) });
+  }, [fontScale]);
 
   return (
     <Editor

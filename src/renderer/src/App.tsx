@@ -1,5 +1,5 @@
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
-import { ChevronDown, CircleAlert, FolderSearch, RefreshCw, Search, Download, Upload, Trash2, PencilLine } from 'lucide-react';
+import { ChevronDown, CircleAlert, FolderSearch, RefreshCw, Search, Download, Upload, Trash2, PencilLine, TerminalSquare } from 'lucide-react';
 import { Suspense, lazy, startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import type {
@@ -17,8 +17,9 @@ import { EntryDialog } from './components/EntryDialog';
 import { EditorTabs, type EditorTabItem } from './components/EditorTabs';
 import { FileTree } from './components/FileTree';
 import { FolderPickerDialog } from './components/FolderPickerDialog';
+import { QuickCommandsDialog, type QuickCommandItem } from './components/QuickCommandsDialog';
 import { SearchDialog } from './components/SearchDialog';
-import { TerminalPanel } from './components/TerminalPanel';
+import { TerminalPanel, type TerminalPanelHandle } from './components/TerminalPanel';
 
 const RemoteEditor = lazy(() => import('./components/RemoteEditor'));
 
@@ -40,6 +41,8 @@ const DEFAULT_CONNECTION_STATUS: ConnectionStatePayload = {
   message: 'Disconnected',
   filesystemState: 'idle',
 };
+
+const QUICK_COMMANDS_STORAGE_KEY = 'ssh-studio.quick-commands.v1';
 
 type EntryDialogState =
   | {
@@ -139,6 +142,48 @@ function mergeWorkspacePaths(existingPaths: string[], nextPath: string): string[
   return [workspacePath, ...existingPaths.filter((path) => path !== workspacePath)].slice(0, 6);
 }
 
+function createQuickCommandId(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID();
+  }
+
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function isQuickCommandItem(value: unknown): value is QuickCommandItem {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as QuickCommandItem).id === 'string' &&
+    typeof (value as QuickCommandItem).name === 'string' &&
+    typeof (value as QuickCommandItem).command === 'string'
+  );
+}
+
+function loadQuickCommands(): QuickCommandItem[] {
+  try {
+    const raw = window.localStorage.getItem(QUICK_COMMANDS_STORAGE_KEY);
+    if (!raw) {
+      return [];
+    }
+
+    const value = JSON.parse(raw) as unknown;
+    return Array.isArray(value)
+      ? value.filter(isQuickCommandItem).filter((item) => item.name.trim() !== '' && item.command.trim() !== '')
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveQuickCommands(commands: QuickCommandItem[]): void {
+  try {
+    window.localStorage.setItem(QUICK_COMMANDS_STORAGE_KEY, JSON.stringify(commands));
+  } catch {
+    // Keep command editing usable even if local storage is unavailable.
+  }
+}
+
 function getFileSystemStatusText(filesystemState: RemoteFileSystemState | undefined): string {
   switch (filesystemState) {
     case 'loading':
@@ -206,12 +251,15 @@ export function App() {
   const [searchCaseSensitive, setSearchCaseSensitive] = useState(false);
   const [searchResults, setSearchResults] = useState<SearchRemoteFilesResult | null>(null);
   const [searchBusy, setSearchBusy] = useState(false);
+  const [quickCommandsDialogOpen, setQuickCommandsDialogOpen] = useState(false);
+  const [quickCommands, setQuickCommands] = useState<QuickCommandItem[]>(() => loadQuickCommands());
   const [editorRevealTarget, setEditorRevealTarget] = useState<{ tabId: string; line: number; column: number } | null>(null);
   const autoSaveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const directoryLoadPromisesRef = useRef(new Map<string, Promise<boolean>>());
   const idlePrefetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingWorkspacePathRef = useRef<string | null>(null);
   const fileMenuRef = useRef<HTMLDivElement | null>(null);
+  const terminalPanelRef = useRef<TerminalPanelHandle | null>(null);
   const treeContextMenuRef = useRef<HTMLDivElement | null>(null);
 
   const activeTab = useMemo(
@@ -275,6 +323,7 @@ export function App() {
         setFolderPickerInitialPath(null);
         setSavedConnectionRenameDialog(null);
         setSearchDialogOpen(false);
+        setQuickCommandsDialogOpen(false);
       }
     });
 
@@ -349,6 +398,12 @@ export function App() {
       if (event.shiftKey && key === 'f' && !showConnectionScreen) {
         event.preventDefault();
         setSearchDialogOpen(true);
+        return;
+      }
+
+      if (event.shiftKey && key === 'p' && !showConnectionScreen) {
+        event.preventDefault();
+        setQuickCommandsDialogOpen(true);
       }
     }
 
@@ -474,6 +529,7 @@ export function App() {
     setEntryDialog(null);
     setFolderPickerInitialPath(null);
     setSearchDialogOpen(false);
+    setQuickCommandsDialogOpen(false);
 
     try {
       await window.electronAPI.disconnect();
@@ -1009,6 +1065,42 @@ export function App() {
     setSearchDialogOpen(false);
   }
 
+  function openQuickCommandsDialog(): void {
+    setQuickCommandsDialogOpen(true);
+  }
+
+  function addQuickCommand(input: { name: string; command: string }): void {
+    const nextCommand: QuickCommandItem = {
+      id: createQuickCommandId(),
+      name: input.name.trim(),
+      command: input.command.trim(),
+    };
+
+    setQuickCommands((previous) => {
+      const nextCommands = [nextCommand, ...previous].slice(0, 40);
+      saveQuickCommands(nextCommands);
+      return nextCommands;
+    });
+    setStatusMessage(`Added quick command ${nextCommand.name}`);
+  }
+
+  function deleteQuickCommand(commandId: string): void {
+    setQuickCommands((previous) => {
+      const deletedCommand = previous.find((command) => command.id === commandId);
+      const nextCommands = previous.filter((command) => command.id !== commandId);
+      saveQuickCommands(nextCommands);
+      if (deletedCommand) {
+        setStatusMessage(`Deleted quick command ${deletedCommand.name}`);
+      }
+      return nextCommands;
+    });
+  }
+
+  function runQuickCommand(command: QuickCommandItem): void {
+    void terminalPanelRef.current?.runCommand(command.command, command.name);
+    setQuickCommandsDialogOpen(false);
+  }
+
   function openCreateEntryDialog(parentPath: string, kind: 'directory' | 'file'): void {
     setFileMenuOpen(false);
     setEntryDialog({
@@ -1342,6 +1434,17 @@ export function App() {
               <Search size={13} />
               <span>Search</span>
             </button>
+            <button
+              type="button"
+              className="menu-button topbar-tool-button"
+              onClick={() => {
+                openQuickCommandsDialog();
+              }}
+              title="Quick Commands (Ctrl/Cmd+Shift+P)"
+            >
+              <TerminalSquare size={13} />
+              <span>Commands</span>
+            </button>
           </div>
 
           <div className="menu-bar-center" title={workspacePath}>
@@ -1491,6 +1594,7 @@ export function App() {
 
         <Panel defaultSize={28} minSize={16}>
           <TerminalPanel
+            ref={terminalPanelRef}
             connectionStatus={connectionStatus}
             workspacePath={workspacePath}
             onStatusMessage={setStatusMessage}
@@ -1586,6 +1690,20 @@ export function App() {
           }}
           onOpenMatch={(path, line, column) => {
             void openFile(path, { line, column });
+          }}
+        />
+      ) : null}
+
+      {quickCommandsDialogOpen ? (
+        <QuickCommandsDialog
+          commands={quickCommands}
+          isConnected={isConnected}
+          workspacePath={workspacePath}
+          onAddCommand={addQuickCommand}
+          onDeleteCommand={deleteQuickCommand}
+          onRunCommand={runQuickCommand}
+          onClose={() => {
+            setQuickCommandsDialogOpen(false);
           }}
         />
       ) : null}

@@ -1,5 +1,5 @@
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
-import { ChevronDown, CircleAlert, FolderSearch, RefreshCw, Search, Download, Upload, Trash2, PencilLine, TerminalSquare } from 'lucide-react';
+import { ChevronDown, CircleAlert, FolderSearch, PlugZap, RefreshCw, Search, Download, Upload, Trash2, PencilLine, TerminalSquare } from 'lucide-react';
 import { Suspense, lazy, startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import type {
@@ -10,7 +10,11 @@ import type {
   RemoteDirectoryEntry,
   SavedConnectionSummary,
   SaveRemoteFileResult,
+  SavedTunnelConfig,
   SearchRemoteFilesResult,
+  TunnelEvent,
+  TunnelRuntimeState,
+  TunnelSnapshot,
 } from '../../shared/contracts';
 import { ConnectionForm } from './components/ConnectionForm';
 import { EntryDialog } from './components/EntryDialog';
@@ -20,6 +24,7 @@ import { FolderPickerDialog } from './components/FolderPickerDialog';
 import { QuickCommandsDialog, type QuickCommandItem } from './components/QuickCommandsDialog';
 import { SearchDialog } from './components/SearchDialog';
 import { TerminalPanel, type TerminalPanelHandle } from './components/TerminalPanel';
+import { TunnelsDialog } from './components/TunnelsDialog';
 
 const RemoteEditor = lazy(() => import('./components/RemoteEditor'));
 
@@ -150,6 +155,10 @@ function createQuickCommandId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+function isTunnelRunning(state: TunnelRuntimeState): boolean {
+  return state.status === 'running' || state.status === 'starting';
+}
+
 function isQuickCommandItem(value: unknown): value is QuickCommandItem {
   return (
     typeof value === 'object' &&
@@ -253,6 +262,11 @@ export function App() {
   const [searchBusy, setSearchBusy] = useState(false);
   const [quickCommandsDialogOpen, setQuickCommandsDialogOpen] = useState(false);
   const [quickCommands, setQuickCommands] = useState<QuickCommandItem[]>(() => loadQuickCommands());
+  const [tunnelsDialogOpen, setTunnelsDialogOpen] = useState(false);
+  const [tunnelSnapshots, setTunnelSnapshots] = useState<TunnelSnapshot[]>([]);
+  const [tunnelDialogLoading, setTunnelDialogLoading] = useState(false);
+  const [tunnelSaveBusy, setTunnelSaveBusy] = useState(false);
+  const [busyTunnelIds, setBusyTunnelIds] = useState<Set<string>>(new Set());
   const [editorRevealTarget, setEditorRevealTarget] = useState<{ tabId: string; line: number; column: number } | null>(null);
   const autoSaveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const directoryLoadPromisesRef = useRef(new Map<string, Promise<boolean>>());
@@ -297,6 +311,10 @@ export function App() {
     },
     [entriesByDirectory, selectedTreePath, workspaceName, workspacePath],
   );
+  const activeTunnelCount = useMemo(
+    () => tunnelSnapshots.filter((snapshot) => isTunnelRunning(snapshot.state)).length,
+    [tunnelSnapshots],
+  );
   const saveActiveTab = useStableCallback(() => {
     if (!activeTabId) {
       return;
@@ -324,6 +342,32 @@ export function App() {
         setSavedConnectionRenameDialog(null);
         setSearchDialogOpen(false);
         setQuickCommandsDialogOpen(false);
+        setTunnelsDialogOpen(false);
+        setTunnelSnapshots([]);
+        setBusyTunnelIds(new Set());
+        setTunnelDialogLoading(false);
+        setTunnelSaveBusy(false);
+      }
+    });
+
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    const unsubscribe = window.electronAPI.onTunnelEvent((event: TunnelEvent) => {
+      setTunnelSnapshots((previous) =>
+        previous.map((snapshot) =>
+          snapshot.config.id === event.state.id
+            ? {
+                ...snapshot,
+                state: event.state,
+              }
+            : snapshot,
+        ),
+      );
+
+      if (event.state.message) {
+        setStatusMessage(event.state.message);
       }
     });
 
@@ -354,6 +398,14 @@ export function App() {
   useEffect(() => {
     void loadSavedConnections(true);
   }, []);
+
+  useEffect(() => {
+    if (!tunnelsDialogOpen || !currentSavedConnectionId) {
+      return;
+    }
+
+    void loadTunnelSnapshots(currentSavedConnectionId);
+  }, [currentSavedConnectionId, tunnelsDialogOpen]);
 
   useEffect(() => {
     if (connectionStatus.state !== 'connected' || !currentSavedConnectionId || workspacePath.trim() === '') {
@@ -404,6 +456,12 @@ export function App() {
       if (event.shiftKey && key === 'p' && !showConnectionScreen) {
         event.preventDefault();
         setQuickCommandsDialogOpen(true);
+        return;
+      }
+
+      if (event.shiftKey && key === 't' && !showConnectionScreen) {
+        event.preventDefault();
+        openTunnelsDialog();
       }
     }
 
@@ -411,7 +469,7 @@ export function App() {
     return () => {
       window.removeEventListener('keydown', handleKeydown);
     };
-  }, [saveActiveTab, showConnectionScreen]);
+  }, [connectionStatus.state, currentSavedConnectionId, saveActiveTab, showConnectionScreen]);
 
   useEffect(() => {
     function handlePointerDown(event: MouseEvent): void {
@@ -1101,6 +1159,125 @@ export function App() {
     setQuickCommandsDialogOpen(false);
   }
 
+  function syncSavedConnectionTunnels(savedConnectionId: string, tunnels: SavedTunnelConfig[]): void {
+    setSavedConnections((previous) =>
+      previous.map((entry) =>
+        entry.id === savedConnectionId
+          ? {
+              ...entry,
+              tunnels,
+            }
+          : entry,
+      ),
+    );
+  }
+
+  function setTunnelBusy(tunnelId: string, busy: boolean): void {
+    setBusyTunnelIds((previous) => {
+      const next = new Set(previous);
+      if (busy) {
+        next.add(tunnelId);
+      } else {
+        next.delete(tunnelId);
+      }
+      return next;
+    });
+  }
+
+  async function loadTunnelSnapshots(savedConnectionId = currentSavedConnectionId): Promise<void> {
+    if (!savedConnectionId) {
+      setTunnelSnapshots([]);
+      return;
+    }
+
+    setTunnelDialogLoading(true);
+
+    try {
+      const snapshots: TunnelSnapshot[] = await window.electronAPI.listTunnels(savedConnectionId);
+      setTunnelSnapshots(snapshots);
+      syncSavedConnectionTunnels(
+        savedConnectionId,
+        snapshots.map((snapshot) => snapshot.config),
+      );
+    } catch (error) {
+      setStatusMessage(getErrorMessage(error, 'Unable to load tunnels'));
+    } finally {
+      setTunnelDialogLoading(false);
+    }
+  }
+
+  function openTunnelsDialog(): void {
+    if (!isConnected || !currentSavedConnectionId) {
+      setStatusMessage('Connect before opening tunnels');
+      return;
+    }
+
+    setTunnelsDialogOpen(true);
+  }
+
+  async function saveTunnel(config: SavedTunnelConfig): Promise<void> {
+    if (!currentSavedConnectionId) {
+      throw new Error('No saved connection available for tunnels');
+    }
+
+    setTunnelSaveBusy(true);
+
+    try {
+      await window.electronAPI.saveTunnel(currentSavedConnectionId, config);
+      await loadTunnelSnapshots(currentSavedConnectionId);
+      setStatusMessage(`Saved tunnel ${config.name}`);
+    } finally {
+      setTunnelSaveBusy(false);
+    }
+  }
+
+  async function deleteTunnel(tunnelId: string): Promise<void> {
+    if (!currentSavedConnectionId) {
+      return;
+    }
+
+    const tunnel = tunnelSnapshots.find((snapshot) => snapshot.config.id === tunnelId)?.config;
+    setTunnelBusy(tunnelId, true);
+
+    try {
+      await window.electronAPI.removeTunnel(currentSavedConnectionId, tunnelId);
+      await loadTunnelSnapshots(currentSavedConnectionId);
+      if (tunnel) {
+        setStatusMessage(`Deleted tunnel ${tunnel.name}`);
+      }
+    } catch (error) {
+      setStatusMessage(getErrorMessage(error, 'Unable to delete tunnel'));
+    } finally {
+      setTunnelBusy(tunnelId, false);
+    }
+  }
+
+  async function startTunnel(tunnelId: string): Promise<void> {
+    if (!currentSavedConnectionId) {
+      return;
+    }
+
+    setTunnelBusy(tunnelId, true);
+    try {
+      await window.electronAPI.startTunnel(currentSavedConnectionId, tunnelId);
+    } catch (error) {
+      setStatusMessage(getErrorMessage(error, 'Unable to start tunnel'));
+    } finally {
+      setTunnelBusy(tunnelId, false);
+    }
+  }
+
+  async function stopTunnel(tunnelId: string): Promise<void> {
+    setTunnelBusy(tunnelId, true);
+    try {
+      await window.electronAPI.stopTunnel(tunnelId);
+    } catch (error) {
+      setStatusMessage(getErrorMessage(error, 'Unable to stop tunnel'));
+    } finally {
+      setTunnelBusy(tunnelId, false);
+    }
+  }
+
   function openCreateEntryDialog(parentPath: string, kind: 'directory' | 'file'): void {
     setFileMenuOpen(false);
     setEntryDialog({
@@ -1445,6 +1622,18 @@ export function App() {
               <TerminalSquare size={13} />
               <span>Commands</span>
             </button>
+            <button
+              type="button"
+              className="menu-button topbar-tool-button"
+              disabled={!isConnected || !currentSavedConnectionId}
+              onClick={() => {
+                openTunnelsDialog();
+              }}
+              title="Tunnels (Ctrl/Cmd+Shift+T)"
+            >
+              <PlugZap size={13} />
+              <span>Tunnels</span>
+            </button>
           </div>
 
           <div className="menu-bar-center" title={workspacePath}>
@@ -1615,6 +1804,9 @@ export function App() {
           <span>{autoSaveEnabled ? 'Auto Save On' : 'Auto Save Off'}</span>
         </div>
         <div className="statusbar-section">
+          <span>{activeTunnelCount} tunnel{activeTunnelCount === 1 ? '' : 's'} active</span>
+        </div>
+        <div className="statusbar-section">
           <span>{activeTab ? activeTab.path : 'No active file'}</span>
         </div>
       </footer>
@@ -1704,6 +1896,24 @@ export function App() {
           onRunCommand={runQuickCommand}
           onClose={() => {
             setQuickCommandsDialogOpen(false);
+          }}
+        />
+      ) : null}
+
+      {tunnelsDialogOpen ? (
+        <TunnelsDialog
+          tunnels={tunnelSnapshots}
+          isConnected={isConnected}
+          isLoading={tunnelDialogLoading}
+          isSaving={tunnelSaveBusy}
+          busyTunnelIds={busyTunnelIds}
+          workspacePath={workspacePath}
+          onSaveTunnel={saveTunnel}
+          onDeleteTunnel={deleteTunnel}
+          onStartTunnel={startTunnel}
+          onStopTunnel={stopTunnel}
+          onClose={() => {
+            setTunnelsDialogOpen(false);
           }}
         />
       ) : null}

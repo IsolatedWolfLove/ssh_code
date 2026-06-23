@@ -33,6 +33,7 @@ export interface SavedConnectionSummary {
   lastConnectedAt: string;
   lastWorkspacePath?: string;
   workspacePaths: string[];
+  tunnels: SavedTunnelConfig[];
 }
 
 export interface ConnectionStatePayload {
@@ -106,6 +107,53 @@ export interface CreateTerminalResult {
   terminalId: string;
 }
 
+export type TunnelKind = 'local' | 'remote' | 'dynamic';
+export type TunnelStatus = 'stopped' | 'starting' | 'running' | 'error';
+
+interface SavedTunnelConfigBase {
+  id: string;
+  name: string;
+  kind: TunnelKind;
+}
+
+export interface SavedLocalTunnelConfig extends SavedTunnelConfigBase {
+  kind: 'local';
+  localHost: string;
+  localPort: number;
+  targetHost: string;
+  targetPort: number;
+}
+
+export interface SavedRemoteTunnelConfig extends SavedTunnelConfigBase {
+  kind: 'remote';
+  remoteHost: string;
+  remotePort: number;
+  targetHost: string;
+  targetPort: number;
+}
+
+export interface SavedDynamicTunnelConfig extends SavedTunnelConfigBase {
+  kind: 'dynamic';
+  localHost: string;
+  localPort: number;
+}
+
+export type SavedTunnelConfig =
+  | SavedLocalTunnelConfig
+  | SavedRemoteTunnelConfig
+  | SavedDynamicTunnelConfig;
+
+export interface TunnelRuntimeState {
+  id: string;
+  status: TunnelStatus;
+  message?: string;
+}
+
+export interface TunnelSnapshot {
+  config: SavedTunnelConfig;
+  state: TunnelRuntimeState;
+}
+
 export type TerminalEvent =
   | {
       type: 'data';
@@ -121,6 +169,11 @@ export type TerminalEvent =
       terminalId: string;
       message: string;
     };
+
+export interface TunnelEvent {
+  type: 'state';
+  state: TunnelRuntimeState;
+}
 
 export const IPC_CHANNELS = {
   openNewWindow: 'window:openNew',
@@ -148,5 +201,11 @@ export const IPC_CHANNELS = {
   terminalResize: 'terminal:resize',
   terminalClose: 'terminal:close',
   terminalEvent: 'terminal:event',
+  tunnelsList: 'tunnels:list',
+  tunnelsSave: 'tunnels:save',
+  tunnelsRemove: 'tunnels:remove',
+  tunnelsStart: 'tunnels:start',
+  tunnelsStop: 'tunnels:stop',
+  tunnelEvent: 'tunnel:event',
   connectionState: 'connection:state',
 } as const;

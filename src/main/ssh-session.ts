@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { createReadStream, createWriteStream, promises as fs } from 'node:fs';
+import net, { type AddressInfo, type Server as NetServer, type Socket as NetSocket } from 'node:net';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 
@@ -16,11 +17,18 @@ import type {
   RenameRemoteEntryInput,
   RemoteDirectoryEntry,
   RemoteFilePayload,
+  SavedDynamicTunnelConfig,
+  SavedLocalTunnelConfig,
+  SavedRemoteTunnelConfig,
+  SavedTunnelConfig,
   SaveRemoteFileInput,
   SaveRemoteFileResult,
   SearchRemoteFilesInput,
   SearchRemoteFilesResult,
   TerminalEvent,
+  TunnelEvent,
+  TunnelRuntimeState,
+  TunnelSnapshot,
 } from '../shared/contracts';
 
 const DIRECTORY_MASK = 0o040000;
@@ -33,6 +41,7 @@ const { Client, utils } = ssh2;
 
 type ConnectionListener = (payload: ConnectionStatePayload) => void;
 type TerminalListener = (payload: TerminalEvent) => void;
+type TunnelListener = (payload: TunnelEvent) => void;
 
 interface CachedDirectoryEntry {
   expiresAt: number;
@@ -44,6 +53,12 @@ interface BufferedTerminalOutput {
   timer: ReturnType<typeof setTimeout> | null;
 }
 
+interface RemoteCommandResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+}
+
 interface ConnectionManagerState {
   auxiliaryState: 'idle' | 'connecting' | 'ready' | 'failed';
   auxiliaryFailureReason: string | null;
@@ -53,6 +68,33 @@ interface TerminalSession {
   client: SshClient;
   channel: ClientChannel;
 }
+
+interface LocalTunnelSession {
+  kind: 'local' | 'dynamic';
+  config: SavedLocalTunnelConfig | SavedDynamicTunnelConfig;
+  server: NetServer;
+  sockets: Set<NetSocket>;
+  channels: Set<ClientChannel>;
+}
+
+interface RemoteTunnelSession {
+  kind: 'remote';
+  config: SavedRemoteTunnelConfig;
+  sockets: Set<NetSocket>;
+  channels: Set<ClientChannel>;
+}
+
+type ActiveTunnelSession = LocalTunnelSession | RemoteTunnelSession;
+
+interface RemoteTunnelConnectionInfo {
+  destIP: string;
+  destPort: number;
+  srcIP: string;
+  srcPort: number;
+}
+
+type RemoteTunnelAccept = () => ClientChannel;
+type RemoteTunnelReject = () => void;
 
 function isDirectory(mode?: number): boolean {
   return typeof mode === 'number' && (mode & TYPE_MASK) === DIRECTORY_MASK;
@@ -169,6 +211,24 @@ function isSearchFallbackError(error: unknown): error is Error & { code: 'SEARCH
   return typeof error === 'object' && error !== null && (error as { code?: string }).code === 'SEARCH_FALLBACK';
 }
 
+function buildRemoteTunnelKey(host: string, port: number): string {
+  return `${host}:${port}`;
+}
+
+function destroySocket(socket: NetSocket): void {
+  if (!socket.destroyed) {
+    socket.destroy();
+  }
+}
+
+function destroyChannel(channel: ClientChannel): void {
+  channel.removeAllListeners();
+  channel.stderr.removeAllListeners();
+  channel.on('error', () => undefined);
+  channel.stderr.on('error', () => undefined);
+  channel.destroy();
+}
+
 export class SshSessionManager {
   private interactiveClient: SshClient | null = null;
   private activeConnectConfig: ConnectConfig | null = null;
@@ -192,6 +252,10 @@ export class SshSessionManager {
   };
   private connectionListeners = new Set<ConnectionListener>();
   private terminalListeners = new Set<TerminalListener>();
+  private tunnelListeners = new Set<TunnelListener>();
+  private activeTunnels = new Map<string, ActiveTunnelSession>();
+  private tunnelStates = new Map<string, TunnelRuntimeState>();
+  private remoteTunnelBindings = new Map<string, string>();
   private isClosing = false;
   private directoryCache = new Map<string, CachedDirectoryEntry>();
   private homeDir: string | null = null;
@@ -208,6 +272,13 @@ export class SshSessionManager {
     this.terminalListeners.add(listener);
     return () => {
       this.terminalListeners.delete(listener);
+    };
+  }
+
+  onTunnelEvent(listener: TunnelListener): () => void {
+    this.tunnelListeners.add(listener);
+    return () => {
+      this.tunnelListeners.delete(listener);
     };
   }
 
@@ -287,6 +358,8 @@ export class SshSessionManager {
   async disconnect(): Promise<void> {
     this.isClosing = true;
 
+    await this.stopAllTunnels();
+
     const terminals = [...this.terminals.values()];
     this.terminals.clear();
     for (const buffered of this.terminalOutputBuffers.values()) {
@@ -312,6 +385,9 @@ export class SshSessionManager {
       auxiliaryFailureReason: null,
     };
     this.filesystemInitPromise = null;
+    this.activeTunnels.clear();
+    this.remoteTunnelBindings.clear();
+    this.tunnelStates.clear();
     this.connectionId = null;
     this.host = null;
     this.homeDir = null;
@@ -342,35 +418,9 @@ export class SshSessionManager {
       return cached.entries;
     }
 
-    const sftp = this.requireSftp();
-
-    const entries = await new Promise<FileEntryWithStats[]>((resolve, reject) => {
-      sftp.readdir(remotePath, (error: Error | undefined, items: FileEntryWithStats[]) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-
-        resolve(items ?? []);
-      });
-    });
-
-    const nextEntries = entries
-      .filter((entry: FileEntryWithStats) => entry.filename !== '.' && entry.filename !== '..')
-      .map((entry: FileEntryWithStats): RemoteDirectoryEntry => ({
-        name: entry.filename,
-        path: path.posix.join(remotePath, entry.filename),
-        kind: isDirectory(entry.attrs.mode) ? 'directory' : 'file',
-        size: typeof entry.attrs.size === 'number' ? entry.attrs.size : undefined,
-        modifiedAt: typeof entry.attrs.mtime === 'number' ? entry.attrs.mtime * 1000 : undefined,
-      }))
-      .sort((left: RemoteDirectoryEntry, right: RemoteDirectoryEntry) => {
-        if (left.kind !== right.kind) {
-          return left.kind === 'directory' ? -1 : 1;
-        }
-
-        return left.name.localeCompare(right.name);
-      });
+    const nextEntries = this.sftp
+      ? await this.readDirWithSftp(remotePath, this.sftp)
+      : await this.readDirWithShell(remotePath);
 
     this.directoryCache.set(remotePath, {
       entries: nextEntries,
@@ -381,6 +431,18 @@ export class SshSessionManager {
   }
 
   async readFile(remotePath: string): Promise<RemoteFilePayload> {
+    if (!this.sftp) {
+      const { stdout, stderr, exitCode } = await this.execRemoteCommand(`cat ${quoteForShell(remotePath)}`);
+      if (exitCode !== 0) {
+        throw new Error(stderr.trim() || `Unable to read ${remotePath}`);
+      }
+
+      return {
+        path: remotePath,
+        content: stdout,
+      };
+    }
+
     const sftp = this.requireSftp();
 
     const content = await new Promise<string>((resolve, reject) => {
@@ -766,6 +828,45 @@ export class SshSessionManager {
     });
   }
 
+  listTunnelSnapshots(configs: SavedTunnelConfig[]): TunnelSnapshot[] {
+    return configs.map((config) => ({
+      config,
+      state: this.getTunnelState(config.id),
+    }));
+  }
+
+  async startTunnel(config: SavedTunnelConfig): Promise<void> {
+    if (!this.interactiveClient || !this.connectionId || this.isClosing) {
+      throw new Error('No active SSH connection');
+    }
+
+    if (this.activeTunnels.has(config.id)) {
+      throw new Error(`Tunnel ${config.name} is already running`);
+    }
+
+    this.setTunnelState(config.id, 'starting', `Starting tunnel ${config.name}`);
+
+    try {
+      const session =
+        config.kind === 'remote'
+          ? await this.startRemoteTunnel(config)
+          : await this.startLocalTunnel(config);
+
+      this.activeTunnels.set(config.id, session);
+      this.setTunnelState(config.id, 'running', this.getTunnelRunningMessage(config, session));
+    } catch (error) {
+      await this.cleanupTunnel(config.id);
+      this.setTunnelState(config.id, 'error', getErrorMessage(error, `Unable to start tunnel ${config.name}`));
+      throw error instanceof Error ? error : new Error('Unable to start tunnel');
+    }
+  }
+
+  async stopTunnel(tunnelId: string): Promise<void> {
+    const tunnel = this.activeTunnels.get(tunnelId);
+    await this.cleanupTunnel(tunnelId);
+    this.setTunnelState(tunnelId, 'stopped', tunnel ? `Stopped tunnel ${tunnel.config.name}` : undefined);
+  }
+
   private async createTerminalChannel(client: SshClient): Promise<ClientChannel> {
     return new Promise<ClientChannel>((resolve, reject) => {
       client.shell(
@@ -798,11 +899,404 @@ export class SshSessionManager {
   }
 
   private destroyTerminalChannel(terminal: ClientChannel): void {
-    terminal.removeAllListeners();
-    terminal.stderr.removeAllListeners();
-    terminal.on('error', () => undefined);
-    terminal.stderr.on('error', () => undefined);
-    terminal.destroy();
+    destroyChannel(terminal);
+  }
+
+  private getTunnelState(tunnelId: string): TunnelRuntimeState {
+    return this.tunnelStates.get(tunnelId) ?? {
+      id: tunnelId,
+      status: 'stopped',
+    };
+  }
+
+  private setTunnelState(tunnelId: string, status: TunnelRuntimeState['status'], message?: string): void {
+    const nextState: TunnelRuntimeState = message ? { id: tunnelId, status, message } : { id: tunnelId, status };
+    this.tunnelStates.set(tunnelId, nextState);
+    this.emitTunnelEvent({
+      type: 'state',
+      state: nextState,
+    });
+  }
+
+  private async startLocalTunnel(
+    config: SavedLocalTunnelConfig | SavedDynamicTunnelConfig,
+  ): Promise<LocalTunnelSession> {
+    const server = net.createServer();
+    const session: LocalTunnelSession = {
+      kind: config.kind,
+      config,
+      server,
+      sockets: new Set(),
+      channels: new Set(),
+    };
+
+    server.on('connection', (socket) => {
+      if (config.kind === 'dynamic') {
+        void this.handleDynamicTunnelSocket(session, socket);
+        return;
+      }
+
+      void this.handleLocalTunnelSocket(session, socket);
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      const handleError = (error: Error) => {
+        server.removeListener('listening', handleListening);
+        reject(error);
+      };
+      const handleListening = () => {
+        server.removeListener('error', handleError);
+        resolve();
+      };
+
+      server.once('error', handleError);
+      server.once('listening', handleListening);
+      server.listen(config.localPort, config.localHost);
+    });
+
+    server.on('error', (error) => {
+      void this.cleanupTunnel(config.id).finally(() => {
+        this.setTunnelState(config.id, 'error', getErrorMessage(error, `Tunnel ${config.name} stopped unexpectedly`));
+      });
+    });
+
+    return session;
+  }
+
+  private async startRemoteTunnel(config: SavedRemoteTunnelConfig): Promise<RemoteTunnelSession> {
+    const client = this.requireInteractiveClient();
+    await new Promise<void>((resolve, reject) => {
+      client.forwardIn(config.remoteHost, config.remotePort, (error?: Error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        resolve();
+      });
+    });
+
+    this.remoteTunnelBindings.set(buildRemoteTunnelKey(config.remoteHost, config.remotePort), config.id);
+    return {
+      kind: 'remote',
+      config,
+      sockets: new Set(),
+      channels: new Set(),
+    };
+  }
+
+  private async handleLocalTunnelSocket(session: LocalTunnelSession, socket: NetSocket): Promise<void> {
+    session.sockets.add(socket);
+    socket.on('close', () => {
+      session.sockets.delete(socket);
+    });
+    socket.on('error', () => {
+      session.sockets.delete(socket);
+    });
+
+    try {
+      const config = session.config;
+      if (config.kind !== 'local') {
+        destroySocket(socket);
+        return;
+      }
+
+      const channel = await this.forwardToRemote(
+        socket.remoteAddress ?? config.localHost,
+        socket.remotePort ?? 0,
+        config.targetHost,
+        config.targetPort,
+      );
+      this.bridgeTunnelConnection(socket, channel, session.sockets, session.channels);
+    } catch {
+      destroySocket(socket);
+    }
+  }
+
+  private async handleDynamicTunnelSocket(session: LocalTunnelSession, socket: NetSocket): Promise<void> {
+    session.sockets.add(socket);
+    socket.on('close', () => {
+      session.sockets.delete(socket);
+    });
+    socket.on('error', () => {
+      session.sockets.delete(socket);
+    });
+
+    try {
+      const result = await this.negotiateSocks5(socket, session.config.localHost);
+      const channel = await this.forwardToRemote(
+        socket.remoteAddress ?? session.config.localHost,
+        socket.remotePort ?? 0,
+        result.targetHost,
+        result.targetPort,
+      );
+      socket.write(result.successResponse);
+      this.bridgeTunnelConnection(socket, channel, session.sockets, session.channels);
+      if (result.remaining.length > 0) {
+        channel.write(result.remaining);
+      }
+    } catch {
+      destroySocket(socket);
+    }
+  }
+
+  private async negotiateSocks5(
+    socket: NetSocket,
+    fallbackHost: string,
+  ): Promise<{ targetHost: string; targetPort: number; remaining: Buffer; successResponse: Buffer }> {
+    let buffer = Buffer.alloc(0);
+
+    const readChunk = () =>
+      new Promise<Buffer>((resolve, reject) => {
+        const cleanup = () => {
+          socket.removeListener('data', handleData);
+          socket.removeListener('close', handleClose);
+          socket.removeListener('end', handleClose);
+          socket.removeListener('error', handleError);
+        };
+        const handleData = (chunk: Buffer) => {
+          cleanup();
+          resolve(chunk);
+        };
+        const handleClose = () => {
+          cleanup();
+          reject(new Error('SOCKS client disconnected'));
+        };
+        const handleError = (error: Error) => {
+          cleanup();
+          reject(error);
+        };
+
+        socket.once('data', handleData);
+        socket.once('close', handleClose);
+        socket.once('end', handleClose);
+        socket.once('error', handleError);
+      });
+
+    const readAtLeast = async (size: number): Promise<void> => {
+      while (buffer.length < size) {
+        buffer = Buffer.concat([buffer, await readChunk()]);
+      }
+    };
+
+    await readAtLeast(2);
+    const version = buffer[0];
+    const methodCount = buffer[1];
+    if (version !== 0x05) {
+      throw new Error('Unsupported SOCKS version');
+    }
+
+    await readAtLeast(2 + methodCount);
+    const methods = [...buffer.subarray(2, 2 + methodCount)];
+    buffer = buffer.subarray(2 + methodCount);
+    if (!methods.includes(0x00)) {
+      socket.write(Buffer.from([0x05, 0xff]));
+      throw new Error('SOCKS client requires unsupported authentication');
+    }
+
+    socket.write(Buffer.from([0x05, 0x00]));
+
+    await readAtLeast(4);
+    const requestVersion = buffer[0];
+    const command = buffer[1];
+    const addressType = buffer[3];
+    if (requestVersion !== 0x05 || command !== 0x01) {
+      socket.write(Buffer.from([0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
+      throw new Error('SOCKS command not supported');
+    }
+
+    let offset = 4;
+    let targetHost = '';
+    if (addressType === 0x01) {
+      await readAtLeast(offset + 4 + 2);
+      targetHost = [...buffer.subarray(offset, offset + 4)].join('.');
+      offset += 4;
+    } else if (addressType === 0x03) {
+      await readAtLeast(offset + 1);
+      const length = buffer[offset];
+      offset += 1;
+      await readAtLeast(offset + length + 2);
+      targetHost = buffer.subarray(offset, offset + length).toString('utf8');
+      offset += length;
+    } else if (addressType === 0x04) {
+      await readAtLeast(offset + 16 + 2);
+      const parts: string[] = [];
+      for (let index = 0; index < 16; index += 2) {
+        parts.push(buffer.readUInt16BE(offset + index).toString(16));
+      }
+      targetHost = parts.join(':');
+      offset += 16;
+    } else {
+      socket.write(Buffer.from([0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
+      throw new Error('SOCKS address type not supported');
+    }
+
+    const targetPort = buffer.readUInt16BE(offset);
+    const remaining = buffer.subarray(offset + 2);
+    const responseAddress = net.isIPv4(fallbackHost)
+      ? fallbackHost.split('.').map((part) => Number(part))
+      : [0, 0, 0, 0];
+
+    return {
+      targetHost,
+      targetPort,
+      remaining,
+      successResponse: Buffer.from([0x05, 0x00, 0x00, 0x01, ...responseAddress, 0x00, 0x00]),
+    };
+  }
+
+  private async forwardToRemote(
+    srcHost: string,
+    srcPort: number,
+    targetHost: string,
+    targetPort: number,
+  ): Promise<ClientChannel> {
+    const client = this.requireInteractiveClient();
+    return new Promise<ClientChannel>((resolve, reject) => {
+      client.forwardOut(srcHost, srcPort, targetHost, targetPort, (error, channel) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        resolve(channel);
+      });
+    });
+  }
+
+  private bridgeTunnelConnection(
+    socket: NetSocket,
+    channel: ClientChannel,
+    sockets: Set<NetSocket>,
+    channels: Set<ClientChannel>,
+  ): void {
+    sockets.add(socket);
+    channels.add(channel);
+
+    let closed = false;
+    const cleanup = () => {
+      if (closed) {
+        return;
+      }
+
+      closed = true;
+      sockets.delete(socket);
+      channels.delete(channel);
+      destroySocket(socket);
+      destroyChannel(channel);
+    };
+
+    socket.on('error', cleanup);
+    socket.on('close', cleanup);
+    channel.on('error', cleanup);
+    channel.on('close', cleanup);
+
+    socket.pipe(channel);
+    channel.pipe(socket);
+  }
+
+  private async cleanupTunnel(tunnelId: string): Promise<void> {
+    const session = this.activeTunnels.get(tunnelId);
+    this.activeTunnels.delete(tunnelId);
+    if (!session) {
+      return;
+    }
+
+    for (const socket of session.sockets) {
+      destroySocket(socket);
+    }
+    for (const channel of session.channels) {
+      destroyChannel(channel);
+    }
+    session.sockets.clear();
+    session.channels.clear();
+
+    if (session.kind === 'remote') {
+      this.remoteTunnelBindings.delete(buildRemoteTunnelKey(session.config.remoteHost, session.config.remotePort));
+      if (this.interactiveClient) {
+        await new Promise<void>((resolve) => {
+          this.interactiveClient?.unforwardIn(session.config.remoteHost, session.config.remotePort, () => resolve());
+        });
+      }
+    } else {
+      await new Promise<void>((resolve) => {
+        try {
+          session.server.close(() => resolve());
+        } catch {
+          resolve();
+        }
+      });
+    }
+  }
+
+  private async stopAllTunnels(): Promise<void> {
+    const tunnelIds = [...this.activeTunnels.keys()];
+    for (const tunnelId of tunnelIds) {
+      await this.cleanupTunnel(tunnelId);
+      this.setTunnelState(tunnelId, 'stopped');
+    }
+    this.remoteTunnelBindings.clear();
+  }
+
+  private getTunnelRunningMessage(config: SavedTunnelConfig, session: ActiveTunnelSession): string {
+    if (config.kind === 'dynamic') {
+      const address = session.kind === 'dynamic' ? session.server.address() : null;
+      const port = typeof address === 'object' && address ? (address as AddressInfo).port : config.localPort;
+      return `SOCKS tunnel ${config.name} listening on ${config.localHost}:${port}`;
+    }
+
+    if (config.kind === 'local') {
+      const address = session.kind === 'local' ? session.server.address() : null;
+      const port = typeof address === 'object' && address ? (address as AddressInfo).port : config.localPort;
+      return `Tunnel ${config.name} listening on ${config.localHost}:${port}`;
+    }
+
+    return `Remote tunnel ${config.name} listening on ${config.remoteHost}:${config.remotePort}`;
+  }
+
+  private handleRemoteTunnelConnection(
+    details: RemoteTunnelConnectionInfo,
+    accept: RemoteTunnelAccept,
+    reject?: RemoteTunnelReject,
+  ): void {
+    const directKey = buildRemoteTunnelKey(details.destIP, details.destPort);
+    const matchedTunnelId =
+      this.remoteTunnelBindings.get(directKey) ??
+      (() => {
+        const byPort = [...this.activeTunnels.values()].find(
+          (session) => session.kind === 'remote' && session.config.remotePort === details.destPort,
+        );
+        return byPort?.config.id;
+      })();
+
+    if (!matchedTunnelId) {
+      reject?.();
+      return;
+    }
+
+    const session = this.activeTunnels.get(matchedTunnelId);
+    if (!session || session.kind !== 'remote') {
+      reject?.();
+      return;
+    }
+
+    const socket = net.connect({
+      host: session.config.targetHost,
+      port: session.config.targetPort,
+    });
+
+    let accepted = false;
+    socket.once('connect', () => {
+      const channel = accept();
+      accepted = true;
+      this.bridgeTunnelConnection(socket, channel, session.sockets, session.channels);
+    });
+    socket.once('error', () => {
+      if (!accepted) {
+        reject?.();
+      }
+      destroySocket(socket);
+    });
   }
 
   private emitConnectionState(payload: ConnectionStatePayload): void {
@@ -814,6 +1308,12 @@ export class SshSessionManager {
 
   private emitTerminalEvent(payload: TerminalEvent): void {
     for (const listener of this.terminalListeners) {
+      listener(payload);
+    }
+  }
+
+  private emitTunnelEvent(payload: TunnelEvent): void {
+    for (const listener of this.tunnelListeners) {
       listener(payload);
     }
   }
@@ -841,6 +1341,46 @@ export class SshSessionManager {
     }
 
     return terminal;
+  }
+
+  private async execRemoteCommand(command: string): Promise<RemoteCommandResult> {
+    const client = this.requireInteractiveClient();
+
+    return new Promise<RemoteCommandResult>((resolve, reject) => {
+      client.exec(command, (error, stream) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        let stdout = '';
+        let stderr = '';
+
+        stream.on('data', (chunk: Buffer | string) => {
+          stdout += chunk.toString();
+        });
+        stream.stderr.on('data', (chunk: Buffer | string) => {
+          stderr += chunk.toString();
+        });
+        stream.on('error', reject);
+        stream.on('close', (exitCode: number | null) => {
+          resolve({ stdout, stderr, exitCode });
+        });
+      });
+    });
+  }
+
+  private async resolveHomeDirectoryWithShell(): Promise<string> {
+    try {
+      const { stdout, exitCode } = await this.execRemoteCommand('pwd -P');
+      if (exitCode !== 0) {
+        return '/';
+      }
+
+      return stdout.trim() || '/';
+    } catch {
+      return '/';
+    }
   }
 
   private async buildConnectConfig(input: ConnectInput): Promise<ConnectConfig> {
@@ -1340,6 +1880,54 @@ export class SshSessionManager {
       });
   }
 
+  private async readDirWithShell(remotePath: string): Promise<RemoteDirectoryEntry[]> {
+    const command = [
+      `dir=${quoteForShell(remotePath)}`,
+      'cd "$dir" || exit 1',
+      'for entry in ./* ./.[!.]* ./..?*; do',
+      '[ -e "$entry" ] || continue',
+      'name=${entry#./}',
+      'if [ -d "$entry" ]; then kind=directory; else kind=file; fi',
+      'printf "%s\\t%s\\n" "$kind" "$name"',
+      'done',
+    ].join('\n');
+    const { stdout, stderr, exitCode } = await this.execRemoteCommand(command);
+
+    if (exitCode !== 0) {
+      throw new Error(stderr.trim() || `Unable to read ${remotePath}`);
+    }
+
+    return stdout
+      .split(/\r?\n/)
+      .filter((line) => line.trim() !== '')
+      .map((line): RemoteDirectoryEntry | null => {
+        const separatorIndex = line.indexOf('\t');
+        if (separatorIndex < 0) {
+          return null;
+        }
+
+        const kind = line.slice(0, separatorIndex) === 'directory' ? 'directory' : 'file';
+        const name = line.slice(separatorIndex + 1);
+        if (name === '' || name === '.' || name === '..') {
+          return null;
+        }
+
+        return {
+          name,
+          path: path.posix.join(remotePath, name),
+          kind,
+        };
+      })
+      .filter((entry): entry is RemoteDirectoryEntry => entry !== null)
+      .sort((left, right) => {
+        if (left.kind !== right.kind) {
+          return left.kind === 'directory' ? -1 : 1;
+        }
+
+        return left.name.localeCompare(right.name);
+      });
+  }
+
   private async deleteRemotePath(remotePath: string): Promise<void> {
     const stats = await this.lstatPath(remotePath);
     if (isDirectory(stats.mode)) {
@@ -1448,14 +2036,16 @@ export class SshSessionManager {
       }
 
       this.sftp = null;
-      this.homeDir = null;
+      const homeDir = await this.resolveHomeDirectoryWithShell();
+      this.homeDir = homeDir;
       this.emitConnectionState({
         ...this.state,
         state: 'connected',
-        message: getErrorMessage(error, 'Remote file system unavailable'),
+        message: `${getErrorMessage(error, 'Remote file system unavailable')}. Using SSH shell file listing.`,
         host,
         connectionId: this.connectionId ?? undefined,
-        filesystemState: 'error',
+        homeDir,
+        filesystemState: 'ready',
       });
     } finally {
       this.filesystemInitPromise = null;
@@ -1534,6 +2124,16 @@ export class SshSessionManager {
         });
       }
     });
+    (client as SshClient & { on: (eventName: string, listener: (...args: unknown[]) => void) => void }).on(
+      'tcp connection',
+      (details: unknown, accept: unknown, reject: unknown) => {
+        this.handleRemoteTunnelConnection(
+          details as RemoteTunnelConnectionInfo,
+          accept as RemoteTunnelAccept,
+          reject as RemoteTunnelReject,
+        );
+      },
+    );
   }
 
   private async tryInitializeAuxiliarySession(config: ConnectConfig, host: string, username: string): Promise<void> {
@@ -1704,6 +2304,9 @@ export class SshSessionManager {
     }
 
     const terminalEntries = [...this.terminals.entries()];
+    void this.stopAllTunnels().finally(() => {
+      this.tunnelStates.clear();
+    });
     for (const [terminalId] of terminalEntries) {
       this.flushTerminalOutput(terminalId);
     }

@@ -4,7 +4,7 @@ import path from 'node:path';
 
 import { safeStorage } from 'electron';
 
-import type { ConnectInput, SavedConnectionSummary } from '../shared/contracts';
+import type { ConnectInput, SavedConnectionSummary, SavedTunnelConfig } from '../shared/contracts';
 
 const SAVED_CONNECTIONS_FILE = 'saved-connections.json';
 const MAX_SAVED_CONNECTIONS = 12;
@@ -31,6 +31,7 @@ interface StoredSavedConnection {
   lastConnectedAt: string;
   lastWorkspacePath?: string;
   workspacePaths?: string[];
+  tunnels?: SavedTunnelConfig[];
 }
 
 interface SavedConnectionsFile {
@@ -48,6 +49,115 @@ function isPasswordEncoding(value: unknown): value is PasswordEncoding {
 
 function isOptionalSecretEncoding(value: unknown): value is OptionalSecretEncoding {
   return value === 'none' || isPasswordEncoding(value);
+}
+
+function isPort(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 65535;
+}
+
+function isSavedTunnelConfig(value: unknown): value is SavedTunnelConfig {
+  if (!isObject(value) || typeof value.id !== 'string' || typeof value.name !== 'string' || typeof value.kind !== 'string') {
+    return false;
+  }
+
+  if (value.kind === 'dynamic') {
+    return typeof value.localHost === 'string' && isPort(value.localPort);
+  }
+
+  if (value.kind === 'local') {
+    return (
+      typeof value.localHost === 'string' &&
+      isPort(value.localPort) &&
+      typeof value.targetHost === 'string' &&
+      isPort(value.targetPort)
+    );
+  }
+
+  if (value.kind === 'remote') {
+    return (
+      typeof value.remoteHost === 'string' &&
+      isPort(value.remotePort) &&
+      typeof value.targetHost === 'string' &&
+      isPort(value.targetPort)
+    );
+  }
+
+  return false;
+}
+
+function normalizeTunnelConfig(config: SavedTunnelConfig): SavedTunnelConfig | null {
+  const id = config.id.trim();
+  const name = config.name.trim();
+  if (id === '' || name === '') {
+    return null;
+  }
+
+  if (config.kind === 'dynamic') {
+    const localHost = config.localHost.trim();
+    if (localHost === '' || !isPort(config.localPort)) {
+      return null;
+    }
+
+    return {
+      ...config,
+      id,
+      name,
+      localHost,
+    };
+  }
+
+  const targetHost = config.targetHost.trim();
+  if (targetHost === '' || !isPort(config.targetPort)) {
+    return null;
+  }
+
+  if (config.kind === 'local') {
+    const localHost = config.localHost.trim();
+    if (localHost === '' || !isPort(config.localPort)) {
+      return null;
+    }
+
+    return {
+      ...config,
+      id,
+      name,
+      localHost,
+      targetHost,
+    };
+  }
+
+  const remoteHost = config.remoteHost.trim();
+  if (remoteHost === '' || !isPort(config.remotePort)) {
+    return null;
+  }
+
+  return {
+    ...config,
+    id,
+    name,
+    remoteHost,
+    targetHost,
+  };
+}
+
+function normalizeTunnels(tunnels: SavedTunnelConfig[] | undefined): SavedTunnelConfig[] {
+  if (!tunnels) {
+    return [];
+  }
+
+  const seen = new Set<string>();
+  const normalized: SavedTunnelConfig[] = [];
+  for (const tunnel of tunnels) {
+    const nextTunnel = normalizeTunnelConfig(tunnel);
+    if (!nextTunnel || seen.has(nextTunnel.id)) {
+      continue;
+    }
+
+    seen.add(nextTunnel.id);
+    normalized.push(nextTunnel);
+  }
+
+  return normalized;
 }
 
 function isStoredSavedConnection(value: unknown): value is StoredSavedConnection {
@@ -77,7 +187,8 @@ function isStoredSavedConnection(value: unknown): value is StoredSavedConnection
     typeof value.lastConnectedAt === 'string' &&
     (value.lastWorkspacePath === undefined || typeof value.lastWorkspacePath === 'string') &&
     (value.workspacePaths === undefined ||
-      (Array.isArray(value.workspacePaths) && value.workspacePaths.every((item) => typeof item === 'string')))
+      (Array.isArray(value.workspacePaths) && value.workspacePaths.every((item) => typeof item === 'string'))) &&
+    (value.tunnels === undefined || (Array.isArray(value.tunnels) && value.tunnels.every(isSavedTunnelConfig)))
   );
 }
 
@@ -148,6 +259,7 @@ function summarizeConnection(connection: StoredSavedConnection): SavedConnection
     lastConnectedAt: connection.lastConnectedAt,
     lastWorkspacePath: getWorkspacePaths(connection)[0],
     workspacePaths: getWorkspacePaths(connection),
+    tunnels: normalizeTunnels(connection.tunnels),
   };
 }
 
@@ -186,6 +298,27 @@ export class SavedConnectionStore {
       hostVerification: connection.hostVerification ?? 'off',
       knownHostsPath: connection.knownHostsPath ?? '',
     };
+  }
+
+  async getTunnels(savedConnectionId: string): Promise<SavedTunnelConfig[]> {
+    await this.mutationQueue;
+    const data = await this.readData();
+    const connection = data.connections.find((entry) => entry.id === savedConnectionId);
+    if (!connection) {
+      throw new Error('Saved connection not found');
+    }
+
+    return normalizeTunnels(connection.tunnels);
+  }
+
+  async getTunnel(savedConnectionId: string, tunnelId: string): Promise<SavedTunnelConfig> {
+    const tunnels = await this.getTunnels(savedConnectionId);
+    const tunnel = tunnels.find((entry) => entry.id === tunnelId);
+    if (!tunnel) {
+      throw new Error('Tunnel not found');
+    }
+
+    return tunnel;
   }
 
   getConnectionId(input: Pick<ConnectInput, 'host' | 'port' | 'username'>): string {
@@ -284,6 +417,71 @@ export class SavedConnectionStore {
     });
   }
 
+  async saveTunnel(savedConnectionId: string, tunnel: SavedTunnelConfig): Promise<void> {
+    const normalizedTunnel = normalizeTunnelConfig(tunnel);
+    if (!normalizedTunnel) {
+      throw new Error('Invalid tunnel configuration');
+    }
+
+    await this.runMutation(async (data) => {
+      let changed = false;
+      const nextConnections = data.connections.map((entry) => {
+        if (entry.id !== savedConnectionId) {
+          return entry;
+        }
+
+        const currentTunnels = normalizeTunnels(entry.tunnels);
+        const existingIndex = currentTunnels.findIndex((item) => item.id === normalizedTunnel.id);
+        const nextTunnels =
+          existingIndex === -1
+            ? [normalizedTunnel, ...currentTunnels]
+            : currentTunnels.map((item, index) => (index === existingIndex ? normalizedTunnel : item));
+
+        changed = true;
+        return {
+          ...entry,
+          tunnels: nextTunnels,
+        };
+      });
+
+      if (!changed) {
+        throw new Error('Saved connection not found');
+      }
+
+      await this.writeData({
+        version: 1,
+        connections: nextConnections,
+      });
+    });
+  }
+
+  async removeTunnel(savedConnectionId: string, tunnelId: string): Promise<void> {
+    await this.runMutation(async (data) => {
+      let changed = false;
+      const nextConnections = data.connections.map((entry) => {
+        if (entry.id !== savedConnectionId) {
+          return entry;
+        }
+
+        const nextTunnels = normalizeTunnels(entry.tunnels).filter((item) => item.id !== tunnelId);
+        changed = true;
+        return {
+          ...entry,
+          tunnels: nextTunnels,
+        };
+      });
+
+      if (!changed) {
+        throw new Error('Saved connection not found');
+      }
+
+      await this.writeData({
+        version: 1,
+        connections: nextConnections,
+      });
+    });
+  }
+
   async removeConnection(savedConnectionId: string): Promise<void> {
     await this.runMutation(async (data) => {
       const nextConnections = data.connections.filter((entry) => entry.id !== savedConnectionId);
@@ -310,7 +508,7 @@ export class SavedConnectionStore {
   private createStoredConnection(
     input: ConnectInput,
     lastConnectedAt: string,
-    previousConnection?: Pick<StoredSavedConnection, 'displayName' | 'lastWorkspacePath' | 'workspacePaths'>,
+    previousConnection?: Pick<StoredSavedConnection, 'displayName' | 'lastWorkspacePath' | 'workspacePaths' | 'tunnels'>,
   ): StoredSavedConnection {
     const host = input.host.trim();
     const username = input.username.trim();
@@ -338,6 +536,7 @@ export class SavedConnectionStore {
       lastConnectedAt,
       lastWorkspacePath: workspacePaths[0],
       workspacePaths,
+      tunnels: normalizeTunnels(previousConnection?.tunnels),
     };
   }
 
@@ -427,6 +626,7 @@ export class SavedConnectionStore {
           displayName: normalizeDisplayName(connection.displayName, connection),
           workspacePaths: getWorkspacePaths(connection),
           lastWorkspacePath: getWorkspacePaths(connection)[0],
+          tunnels: normalizeTunnels(connection.tunnels),
         }))
         .sort(compareByRecentUse)
         .slice(0, MAX_SAVED_CONNECTIONS),

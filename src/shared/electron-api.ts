@@ -11,9 +11,12 @@ import type {
   SavedConnectionSummary,
   SaveRemoteFileInput,
   SaveRemoteFileResult,
+  SavedTunnelConfig,
   SearchRemoteFilesInput,
   SearchRemoteFilesResult,
   TerminalEvent,
+  TunnelEvent,
+  TunnelSnapshot,
 } from './contracts';
 
 export interface ElectronApi {
@@ -41,6 +44,12 @@ export interface ElectronApi {
   writeTerminal: (terminalId: string, data: string) => Promise<void>;
   resizeTerminal: (terminalId: string, cols: number, rows: number) => Promise<void>;
   closeTerminal: (terminalId: string) => Promise<void>;
+  listTunnels: (savedConnectionId: string) => Promise<TunnelSnapshot[]>;
+  saveTunnel: (savedConnectionId: string, tunnel: SavedTunnelConfig) => Promise<void>;
+  removeTunnel: (savedConnectionId: string, tunnelId: string) => Promise<void>;
+  startTunnel: (savedConnectionId: string, tunnelId: string) => Promise<void>;
+  stopTunnel: (tunnelId: string) => Promise<void>;
   onTerminalEvent: (callback: (event: TerminalEvent) => void) => () => void;
+  onTunnelEvent: (callback: (event: TunnelEvent) => void) => () => void;
   onConnectionState: (callback: (state: ConnectionStatePayload) => void) => () => void;
 }

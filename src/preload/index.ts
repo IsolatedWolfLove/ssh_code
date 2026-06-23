@@ -33,6 +33,13 @@ const electronApi: ElectronApi = {
   resizeTerminal: (terminalId, cols, rows) =>
     ipcRenderer.invoke(IPC_CHANNELS.terminalResize, terminalId, cols, rows),
   closeTerminal: (terminalId) => ipcRenderer.invoke(IPC_CHANNELS.terminalClose, terminalId),
+  listTunnels: (savedConnectionId) => ipcRenderer.invoke(IPC_CHANNELS.tunnelsList, savedConnectionId),
+  saveTunnel: (savedConnectionId, tunnel) => ipcRenderer.invoke(IPC_CHANNELS.tunnelsSave, savedConnectionId, tunnel),
+  removeTunnel: (savedConnectionId, tunnelId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.tunnelsRemove, savedConnectionId, tunnelId),
+  startTunnel: (savedConnectionId, tunnelId) =>
+    ipcRenderer.invoke(IPC_CHANNELS.tunnelsStart, savedConnectionId, tunnelId),
+  stopTunnel: (tunnelId) => ipcRenderer.invoke(IPC_CHANNELS.tunnelsStop, tunnelId),
   onTerminalEvent: (callback) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => {
       callback(payload);
@@ -41,6 +48,16 @@ const electronApi: ElectronApi = {
     ipcRenderer.on(IPC_CHANNELS.terminalEvent, listener);
     return () => {
       ipcRenderer.removeListener(IPC_CHANNELS.terminalEvent, listener);
+    };
+  },
+  onTunnelEvent: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => {
+      callback(payload);
+    };
+
+    ipcRenderer.on(IPC_CHANNELS.tunnelEvent, listener);
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.tunnelEvent, listener);
     };
   },
   onConnectionState: (callback) => {

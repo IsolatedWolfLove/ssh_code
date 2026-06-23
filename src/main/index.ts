@@ -9,6 +9,7 @@ import type {
   CreateRemoteEntryInput,
   DeleteRemoteEntryInput,
   RenameRemoteEntryInput,
+  SavedTunnelConfig,
   SaveRemoteFileInput,
   SearchRemoteFilesInput,
 } from '../shared/contracts';
@@ -20,6 +21,7 @@ interface WindowSession {
   sessionManager: SshSessionManager;
   unsubscribeConnectionState: () => void;
   unsubscribeTerminalEvent: () => void;
+  unsubscribeTunnelEvent: () => void;
 }
 
 const windowSessions = new Map<number, WindowSession>();
@@ -131,12 +133,18 @@ function createMainWindow(): BrowserWindow {
       window.webContents.send(IPC_CHANNELS.terminalEvent, payload);
     }
   });
+  const unsubscribeTunnelEvent = sessionManager.onTunnelEvent((payload) => {
+    if (!window.isDestroyed()) {
+      window.webContents.send(IPC_CHANNELS.tunnelEvent, payload);
+    }
+  });
 
   windowSessions.set(webContentsId, {
     window,
     sessionManager,
     unsubscribeConnectionState,
     unsubscribeTerminalEvent,
+    unsubscribeTunnelEvent,
   });
 
   if (process.env.VITE_DEV_SERVER_URL) {
@@ -161,6 +169,7 @@ async function disposeWindowSession(webContentsId: number): Promise<void> {
   windowSessions.delete(webContentsId);
   session.unsubscribeConnectionState();
   session.unsubscribeTerminalEvent();
+  session.unsubscribeTunnelEvent();
 
   try {
     await session.sessionManager.disconnect();
@@ -208,10 +217,7 @@ function registerIpc(): void {
   ipcMain.handle(IPC_CHANNELS.connect, async (event, input: ConnectInput) => {
     const savedConnectionId = getSavedConnectionStore().getConnectionId(input);
     const result = await getSessionManager(event.sender.id).connect(input);
-
-    void getSavedConnectionStore().saveConnection(input).catch((error) => {
-      console.error('Unable to persist saved connection', error);
-    });
+    await getSavedConnectionStore().saveConnection(input);
 
     return {
       ...result,
@@ -221,10 +227,7 @@ function registerIpc(): void {
   ipcMain.handle(IPC_CHANNELS.connectSaved, async (event, savedConnectionId: string) => {
     const input = await getSavedConnectionStore().getConnectInput(savedConnectionId);
     const result = await getSessionManager(event.sender.id).connect(input);
-
-    void getSavedConnectionStore().saveConnection(input).catch((error) => {
-      console.error('Unable to persist saved connection', error);
-    });
+    await getSavedConnectionStore().saveConnection(input);
 
     return {
       ...result,
@@ -326,6 +329,25 @@ function registerIpc(): void {
   );
   ipcMain.handle(IPC_CHANNELS.terminalClose, (event, terminalId: string) =>
     getSessionManager(event.sender.id).closeTerminal(terminalId),
+  );
+  ipcMain.handle(IPC_CHANNELS.tunnelsList, async (_event, savedConnectionId: string) => {
+    const configs = await getSavedConnectionStore().getTunnels(savedConnectionId);
+    return getSessionManager(_event.sender.id).listTunnelSnapshots(configs);
+  });
+  ipcMain.handle(IPC_CHANNELS.tunnelsSave, async (event, savedConnectionId: string, tunnel: SavedTunnelConfig) => {
+    await getSessionManager(event.sender.id).stopTunnel(tunnel.id);
+    await getSavedConnectionStore().saveTunnel(savedConnectionId, tunnel);
+  });
+  ipcMain.handle(IPC_CHANNELS.tunnelsRemove, async (event, savedConnectionId: string, tunnelId: string) => {
+    await getSessionManager(event.sender.id).stopTunnel(tunnelId);
+    await getSavedConnectionStore().removeTunnel(savedConnectionId, tunnelId);
+  });
+  ipcMain.handle(IPC_CHANNELS.tunnelsStart, async (event, savedConnectionId: string, tunnelId: string) => {
+    const tunnel = await getSavedConnectionStore().getTunnel(savedConnectionId, tunnelId);
+    await getSessionManager(event.sender.id).startTunnel(tunnel);
+  });
+  ipcMain.handle(IPC_CHANNELS.tunnelsStop, (event, tunnelId: string) =>
+    getSessionManager(event.sender.id).stopTunnel(tunnelId),
   );
 }
 

@@ -180,7 +180,7 @@ export function ConnectionForm({
             <input
               value={value.privateKeyPath ?? ''}
               onChange={handleField('privateKeyPath')}
-              placeholder="~/.ssh/id_ed25519"
+              placeholder="Path to private key file"
             />
           </label>
           <label>
@@ -201,7 +201,7 @@ export function ConnectionForm({
           <input
             value={value.agentSocket ?? ''}
             onChange={handleField('agentSocket')}
-            placeholder="/run/user/1000/ssh-agent.socket"
+            placeholder="Path to SSH agent socket or pipe"
           />
         </label>
       ) : null}
@@ -226,7 +226,7 @@ export function ConnectionForm({
           <input
             value={value.knownHostsPath ?? ''}
             onChange={handleField('knownHostsPath')}
-            placeholder="~/.ssh/known_hosts"
+            placeholder="Path to known_hosts file"
           />
         </label>
       ) : null}

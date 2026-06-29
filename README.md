@@ -1,6 +1,6 @@
 # SSH Studio
 
-SSH Studio is a Linux desktop SSH workspace client built with Electron, React, TypeScript, Monaco Editor, xterm.js, and `ssh2`. It combines connection history, SFTP file management, remote code editing, workspace search, and interactive terminals in one focused app.
+SSH Studio is a desktop SSH workspace client built with Electron, React, TypeScript, Monaco Editor, xterm.js, and `ssh2`. It combines connection history, SFTP file management, remote code editing, workspace search, and interactive terminals in one focused app.
 
 ## Features
 
@@ -57,6 +57,7 @@ npm run build
 ```bash
 npm run package
 npm run package:deb
+npm run package:win
 ```
 
 Build artifacts are written to `release/`.
@@ -75,7 +76,7 @@ Build artifacts are written to `release/`.
 
 # SSH Studio 中文说明
 
-SSH Studio 是一个面向 Linux 桌面的 SSH 远程工作区客户端，基于 Electron、React、TypeScript、Monaco Editor、xterm.js 和 `ssh2` 构建。它把连接历史、SFTP 文件管理、远程代码编辑、工作区搜索和交互式终端整合在一个专注的应用里。
+SSH Studio 是一个桌面端 SSH 远程工作区客户端，基于 Electron、React、TypeScript、Monaco Editor、xterm.js 和 `ssh2` 构建。它把连接历史、SFTP 文件管理、远程代码编辑、工作区搜索和交互式终端整合在一个专注的应用里。
 
 ## 功能特性
 
@@ -132,6 +133,7 @@ npm run build
 ```bash
 npm run package
 npm run package:deb
+npm run package:win
 ```
 
 构建产物会输出到 `release/`。

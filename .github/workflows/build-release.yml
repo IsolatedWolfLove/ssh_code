@@ -1,4 +1,4 @@
-name: Build Linux Deb
+name: Build Release Artifacts
 
 on:
   push:
@@ -9,9 +9,24 @@ permissions:
   contents: write
 
 jobs:
-  build-deb:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 30
+  build:
+    name: Build ${{ matrix.label }}
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Linux Deb
+            platform: linux
+            runs_on: ubuntu-22.04
+            package_command: npm run package:deb
+            artifact_path: release/*.deb
+          - label: Windows EXE
+            platform: windows
+            runs_on: windows-2022
+            package_command: npm run package:win
+            artifact_path: release/*.exe
 
     steps:
       - name: Check out repository
@@ -24,14 +39,19 @@ jobs:
           cache: npm
 
       - name: Install Linux packaging dependencies
+        if: matrix.platform == 'linux'
+        shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y fakeroot dpkg
 
       - name: Install npm dependencies
+        shell: bash
         run: npm ci
 
       - name: Prepare Debian metadata
+        if: matrix.platform == 'linux'
+        shell: bash
         env:
           REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
@@ -59,23 +79,24 @@ jobs:
           NODE
 
       - name: Read app version
+        shell: bash
         run: |
           APP_VERSION=$(node -p "require('./package.json').version")
           echo "APP_VERSION=${APP_VERSION}" >> "$GITHUB_ENV"
 
-      - name: Build Debian package
-        run: npm run package:deb
+      - name: Build release package
+        shell: bash
+        run: ${{ matrix.package_command }}
 
-      - name: Upload Debian artifact
+      - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ssh-studio-deb-${{ env.APP_VERSION }}
-          path: release/*.deb
+          name: ssh-studio-${{ matrix.platform }}-${{ env.APP_VERSION }}
+          path: ${{ matrix.artifact_path }}
           if-no-files-found: error
 
-      - name: Upload Debian package to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Upload package to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: release/*.deb
+          files: ${{ matrix.artifact_path }}
           fail_on_unmatched_files: true

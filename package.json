@@ -2,7 +2,7 @@
   "name": "ssh-studio",
   "version": "0.1.7",
   "private": true,
-  "description": "Linux SSH client with SFTP file tree, Monaco editor, and integrated terminal.",
+  "description": "Desktop SSH client with SFTP file tree, Monaco editor, and integrated terminal.",
   "author": {
     "name": "IsolatedWolfLove",
     "email": "IsolatedWolfLove@users.noreply.github.com"
@@ -16,7 +16,8 @@
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit",
     "package:deb": "npm run build && electron-builder --linux deb --x64 --publish never",
-    "package": "npm run build && electron-builder --linux --publish never"
+    "package:win": "npm run build && electron-builder --win nsis --x64 --publish never",
+    "package": "npm run build && electron-builder --publish never"
   },
   "dependencies": {
     "ssh2": "^1.16.0"
@@ -62,6 +63,11 @@
       ],
       "maintainer": "IsolatedWolfLove <IsolatedWolfLove@users.noreply.github.com>",
       "category": "Development"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
     }
   }
 }

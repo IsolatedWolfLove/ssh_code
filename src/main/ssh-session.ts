@@ -1,11 +1,20 @@
 import { randomUUID } from 'node:crypto';
 import { createReadStream, createWriteStream, promises as fs } from 'node:fs';
+import { lstat as fsLstat } from 'node:fs/promises';
 import net, { type AddressInfo, type Server as NetServer, type Socket as NetSocket } from 'node:net';
 import path from 'node:path';
+import { PassThrough, Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 
 import ssh2 from 'ssh2';
-import type { Client as SshClient, ClientChannel, ConnectConfig, FileEntryWithStats, SFTPWrapper, Stats } from 'ssh2';
+import type {
+  Client as SshClient,
+  ClientChannel,
+  ConnectConfig,
+  FileEntryWithStats,
+  SFTPWrapper,
+  Stats,
+} from 'ssh2';
 
 import type {
   CreateTerminalResult,
@@ -13,23 +22,30 @@ import type {
   DeleteRemoteEntryInput,
   ConnectInput,
   ConnectResult,
-  ConnectionStatePayload,
-  RenameRemoteEntryInput,
-  RemoteDirectoryEntry,
-  RemoteFilePayload,
-  SavedDynamicTunnelConfig,
-  SavedLocalTunnelConfig,
-  SavedRemoteTunnelConfig,
-  SavedTunnelConfig,
-  SaveRemoteFileInput,
-  SaveRemoteFileResult,
-  SearchRemoteFilesInput,
-  SearchRemoteFilesResult,
-  TerminalEvent,
-  TunnelEvent,
-  TunnelRuntimeState,
-  TunnelSnapshot,
-} from '../shared/contracts';
+    ConnectionStatePayload,
+    ConnectionDiagnosticCode,
+    RenameRemoteEntryInput,
+    RemoteDirectoryEntry,
+    RemoteFilePayload,
+    SavedDynamicTunnelConfig,
+    SavedLocalTunnelConfig,
+    SavedRemoteTunnelConfig,
+    SavedTunnelConfig,
+    SaveRemoteFileInput,
+    SaveRemoteFileResult,
+    SearchRemoteFilesInput,
+    SearchRemoteFilesResult,
+    FileConflictItem,
+    FileConflictStrategy,
+    FileOperationEvent,
+    FileOperationResult,
+    UploadLocalEntriesInput,
+    DownloadRemoteEntryInput,
+    TerminalEvent,
+    TunnelEvent,
+    TunnelRuntimeState,
+    TunnelSnapshot,
+  } from '../shared/contracts';
 
 const DIRECTORY_MASK = 0o040000;
 const TYPE_MASK = 0o170000;
@@ -42,6 +58,7 @@ const { Client, utils } = ssh2;
 type ConnectionListener = (payload: ConnectionStatePayload) => void;
 type TerminalListener = (payload: TerminalEvent) => void;
 type TunnelListener = (payload: TunnelEvent) => void;
+type FileOperationListener = (payload: FileOperationEvent) => void;
 
 interface CachedDirectoryEntry {
   expiresAt: number;
@@ -67,6 +84,37 @@ interface ConnectionManagerState {
 interface TerminalSession {
   client: SshClient;
   channel: ClientChannel;
+}
+
+interface FileOperationProgress {
+  operationId: string;
+  kind: FileOperationEvent['kind'];
+  sourcePath: string;
+  targetPath: string;
+  totalItems: number;
+  completedItems: number;
+  skippedItems: number;
+}
+
+interface LocalPathSummary {
+  files: number;
+  directories: number;
+}
+
+interface TransferSftpHandle {
+  sftp: SFTPWrapper | null;
+  viaShell: boolean;
+}
+
+interface ConnectionDiagnostic {
+  code: ConnectionDiagnosticCode;
+  message: string;
+  recoveryHint: string;
+  recoverable: boolean;
+}
+
+interface ConnectMetadata {
+  authMethod: NonNullable<ConnectInput['authMethod']>;
 }
 
 interface LocalTunnelSession {
@@ -106,6 +154,91 @@ function getErrorMessage(error: unknown, fallback: string): string {
   }
 
   return fallback;
+}
+
+function extractUrl(text: string): string | null {
+  const match = text.match(/https?:\/\/\S+/i);
+  return match ? match[0].replace(/[),.;]+$/, '') : null;
+}
+
+function classifyConnectionError(error: unknown): ConnectionDiagnostic {
+  const message = getErrorMessage(error, 'Unable to connect to the remote host');
+  const lower = message.toLowerCase();
+
+  if (
+    lower.includes('all configured authentication methods failed') ||
+    lower.includes('permission denied') ||
+    lower.includes('auth fail') ||
+    lower.includes('authentication failed')
+  ) {
+    const wrongPassword = lower.includes('password');
+    return {
+      code: wrongPassword ? 'wrongPassword' : 'authenticationFailed',
+      message: wrongPassword ? 'Password authentication failed' : 'SSH authentication failed',
+      recoveryHint: wrongPassword ? 'Check the password and username.' : 'Check the selected authentication method and credentials.',
+      recoverable: true,
+    };
+  }
+
+  if (
+    lower.includes('host verification failed') ||
+    lower.includes('host key') ||
+    lower.includes('known_hosts') ||
+    lower.includes('fingerprint')
+  ) {
+    return {
+      code: 'knownHosts',
+      message: 'Host verification failed',
+      recoveryHint: 'Check the known_hosts path or update the host key entry.',
+      recoverable: true,
+    };
+  }
+
+  if (
+    lower.includes('private key') ||
+    lower.includes('passphrase') ||
+    lower.includes('agent socket is required') ||
+    lower.includes('cannot parse privatekey')
+  ) {
+    return {
+      code: 'privateKey',
+      message: 'Private key authentication failed',
+      recoveryHint: 'Check the key path, key format, and passphrase.',
+      recoverable: true,
+    };
+  }
+
+  if (
+    lower.includes('timed out') ||
+    lower.includes('ehostunreach') ||
+    lower.includes('enotfound') ||
+    lower.includes('econnrefused') ||
+    lower.includes('econnreset') ||
+    lower.includes('network is unreachable') ||
+    lower.includes('no route to host')
+  ) {
+    if (lower.includes('timed out') && lower.includes('handshake')) {
+      return {
+        code: 'authenticationFailed',
+        message: 'Timed out while waiting for Tailscale SSH verification',
+        recoveryHint: 'Open the login link and complete the browser check before the timeout expires.',
+        recoverable: true,
+      };
+    }
+    return {
+      code: 'hostUnreachable',
+      message: 'Host unreachable',
+      recoveryHint: 'Check the host, port, network path, and whether SSH is listening.',
+      recoverable: true,
+    };
+  }
+
+  return {
+    code: 'unknown',
+    message,
+    recoveryHint: 'Check the connection settings and SSH server logs.',
+    recoverable: true,
+  };
 }
 
 function escapeRegExp(value: string): string {
@@ -198,6 +331,9 @@ function buildSearchPreview(lineText: string, startIndex: number, matchLength: n
 }
 
 function quoteForShell(value: string): string {
+  if (typeof value !== 'string') {
+    throw new Error('Invalid shell path');
+  }
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
@@ -253,12 +389,14 @@ export class SshSessionManager {
   private connectionListeners = new Set<ConnectionListener>();
   private terminalListeners = new Set<TerminalListener>();
   private tunnelListeners = new Set<TunnelListener>();
+  private fileOperationListeners = new Set<FileOperationListener>();
   private activeTunnels = new Map<string, ActiveTunnelSession>();
   private tunnelStates = new Map<string, TunnelRuntimeState>();
   private remoteTunnelBindings = new Map<string, string>();
   private isClosing = false;
   private directoryCache = new Map<string, CachedDirectoryEntry>();
   private homeDir: string | null = null;
+  private activeConnectMetadata: ConnectMetadata | null = null;
 
   onConnectionState(listener: ConnectionListener): () => void {
     this.connectionListeners.add(listener);
@@ -282,6 +420,13 @@ export class SshSessionManager {
     };
   }
 
+  onFileOperationEvent(listener: FileOperationListener): () => void {
+    this.fileOperationListeners.add(listener);
+    return () => {
+      this.fileOperationListeners.delete(listener);
+    };
+  }
+
   async connect(input: ConnectInput): Promise<ConnectResult> {
     await this.disconnect();
 
@@ -295,11 +440,16 @@ export class SshSessionManager {
 
     try {
       const config = await this.buildConnectConfig(input);
-      const interactiveClient = await this.createConnectedClient(config);
+      const interactiveClient = await this.createConnectedClient(config, {
+        authMethod: input.authMethod ?? 'password',
+      });
       this.attachInteractiveClientListeners(interactiveClient);
 
       this.interactiveClient = interactiveClient;
       this.activeConnectConfig = config;
+      this.activeConnectMetadata = {
+        authMethod: input.authMethod ?? 'password',
+      };
       this.auxiliaryAttempted = false;
       this.auxiliaryClient = null;
       this.auxiliarySftp = null;
@@ -319,6 +469,7 @@ export class SshSessionManager {
         host: input.host,
         connectionId: this.connectionId,
         filesystemState: 'loading',
+        authUrl: undefined,
       });
 
       return {
@@ -330,6 +481,7 @@ export class SshSessionManager {
       this.interactiveClient?.end();
       this.interactiveClient = null;
       this.activeConnectConfig = null;
+      this.activeConnectMetadata = null;
       this.sftp = null;
       this.auxiliaryClient?.removeAllListeners();
       this.auxiliaryClient?.end();
@@ -344,14 +496,19 @@ export class SshSessionManager {
       this.connectionId = null;
       this.homeDir = null;
       this.directoryCache.clear();
-      const message = getErrorMessage(error, 'Unable to connect to the remote host');
+      const diagnostic = classifyConnectionError(error);
       this.emitConnectionState({
         state: 'error',
-        message,
+        message: `${diagnostic.message}. ${diagnostic.recoveryHint}`,
         host: input.host,
         filesystemState: 'error',
+        reason: 'connectFailed',
+        diagnosticCode: diagnostic.code,
+        recoveryHint: diagnostic.recoveryHint,
+        recoverable: diagnostic.recoverable,
+        authUrl: undefined,
       });
-      throw new Error(message);
+      throw new Error(`${diagnostic.message}. ${diagnostic.recoveryHint}`);
     }
   }
 
@@ -375,6 +532,7 @@ export class SshSessionManager {
     const interactiveClient = this.interactiveClient;
     this.interactiveClient = null;
     this.activeConnectConfig = null;
+    this.activeConnectMetadata = null;
     this.sftp = null;
     const auxiliaryClient = this.auxiliaryClient;
     this.auxiliaryClient = null;
@@ -407,6 +565,9 @@ export class SshSessionManager {
       state: 'disconnected',
       message: 'Disconnected',
       filesystemState: 'idle',
+      reason: 'manual',
+      recoverable: true,
+      authUrl: undefined,
     });
 
     this.isClosing = false;
@@ -463,7 +624,6 @@ export class SshSessionManager {
   }
 
   async writeFileAtomic(input: SaveRemoteFileInput): Promise<SaveRemoteFileResult> {
-    const sftp = this.requireSftp();
     const temporaryPath = this.buildTemporaryPath(input.path);
 
     try {
@@ -495,8 +655,8 @@ export class SshSessionManager {
         savedAt: new Date().toISOString(),
       };
     } catch (error) {
-      await new Promise<void>((resolve) => {
-        sftp.unlink(temporaryPath, () => resolve());
+      await this.unlinkIfExists(temporaryPath).catch(() => {
+        // ponytail: temp-file cleanup is best-effort after the write already failed.
       });
       throw new Error(getErrorMessage(error, `Unable to save ${input.path}`));
     }
@@ -504,19 +664,26 @@ export class SshSessionManager {
 
   async createEntry(input: CreateRemoteEntryInput): Promise<RemoteDirectoryEntry> {
     const targetPath = path.posix.join(input.parentPath, input.name);
-    const sftp = this.requireSftp();
 
     if (input.kind === 'directory') {
-      await new Promise<void>((resolve, reject) => {
-        sftp.mkdir(targetPath, (error?: Error | null) => {
-          if (error) {
-            reject(error);
-            return;
-          }
+      if (this.sftp) {
+        await new Promise<void>((resolve, reject) => {
+          this.sftp!.mkdir(targetPath, (error?: Error | null) => {
+            if (error) {
+              reject(error);
+              return;
+            }
 
-          resolve();
+            resolve();
+          });
         });
-      });
+      } else {
+        const command = [`dir=${quoteForShell(targetPath)}`, 'mkdir "$dir"'].join('\n');
+        const { stderr, exitCode } = await this.execRemoteCommand(command);
+        if (exitCode !== 0) {
+          throw new Error(stderr.trim() || `Unable to create ${targetPath}`);
+        }
+      }
 
       this.invalidateDirectoryCache(input.parentPath);
 
@@ -547,10 +714,19 @@ export class SshSessionManager {
       await this.renamePath(input.path, targetPath);
     }
 
-    const stats = await this.statPath(targetPath);
     this.invalidateDirectoryCache(path.posix.dirname(input.path));
     this.invalidateDirectoryCache(input.path);
     this.invalidateDirectoryCache(targetPath);
+
+    if (!this.sftp) {
+      return {
+        name: input.nextName,
+        path: targetPath,
+        kind: await this.getRemoteEntryKindWithShell(targetPath),
+      };
+    }
+
+    const stats = await this.statPath(targetPath);
 
     return {
       name: input.nextName,
@@ -562,40 +738,142 @@ export class SshSessionManager {
   }
 
   async deleteEntry(input: DeleteRemoteEntryInput): Promise<void> {
-    await this.deleteRemotePath(input.path);
-    this.invalidateDirectoryCache(path.posix.dirname(input.path));
-    this.invalidateDirectoryCache(input.path);
+    const operationId = input.operationId ?? randomUUID();
+    const totalItems = await this.countRemoteItems(input.path, undefined, true);
+    const progress = this.createFileOperationProgress(operationId, 'delete', input.path, input.path, totalItems);
+
+    this.emitFileOperationState(progress, 'running', `Deleting ${input.path}`);
+    try {
+      await this.deleteRemotePath(input.path, progress);
+      this.invalidateDirectoryCache(path.posix.dirname(input.path));
+      this.invalidateDirectoryCache(input.path);
+      this.emitFileOperationState(progress, 'completed', `Deleted ${input.path}`);
+    } catch (error) {
+      this.emitFileOperationState(progress, 'failed', `Delete failed for ${input.path}`, {
+        error: getErrorMessage(error, `Unable to delete ${input.path}`),
+        retryable: true,
+      });
+      throw error;
+    }
   }
 
-  async uploadLocalEntries(localPaths: string[], remotePath: string): Promise<void> {
-    if (localPaths.length === 0) {
-      return;
+  async uploadLocalEntries(input: UploadLocalEntriesInput): Promise<FileOperationResult> {
+    if (input.localPaths.length === 0) {
+      return { status: 'completed', skippedItems: 0 };
     }
 
-    const sftp = await this.getTransferSftp();
-    for (const localPath of localPaths) {
-      const stats = await fs.stat(localPath);
-      const targetPath = path.posix.join(remotePath, normalizeLocalName(localPath));
-      if (stats.isDirectory()) {
-        await this.uploadLocalDirectory(localPath, targetPath, sftp);
-      } else if (stats.isFile()) {
-        await this.uploadLocalFile(localPath, targetPath, sftp);
+    const transfer = await this.getTransferSftpHandle();
+    const sftp = transfer.sftp ?? undefined;
+    const conflicts = await this.collectUploadConflicts(input.localPaths, input.remotePath, sftp);
+    if (conflicts.length > 0 && (input.conflictStrategy ?? 'ask') === 'ask') {
+      return { status: 'conflict', conflicts };
+    }
+
+    const progress = this.createFileOperationProgress(
+      input.operationId,
+      'upload',
+      input.localPaths[0] ?? input.remotePath,
+      input.remotePath,
+      await this.countLocalItems(input.localPaths),
+    );
+
+    this.emitFileOperationState(progress, 'running', `Uploading into ${input.remotePath}`);
+    try {
+      for (const localPath of input.localPaths) {
+        const stats = await fs.stat(localPath);
+        const targetPath = path.posix.join(input.remotePath, normalizeLocalName(localPath));
+        if (stats.isDirectory()) {
+          await this.uploadLocalDirectory(localPath, targetPath, sftp, progress, input.conflictStrategy ?? 'ask');
+        } else if (stats.isFile()) {
+          await this.uploadLocalFile(localPath, targetPath, sftp, progress, input.conflictStrategy ?? 'ask');
+        }
       }
-    }
 
-    this.invalidateDirectoryCache(remotePath);
+      this.invalidateDirectoryCache(input.remotePath);
+      this.emitFileOperationState(progress, 'completed', `Uploaded into ${input.remotePath}`);
+      return {
+        status: 'completed',
+        skippedItems: progress.skippedItems,
+      };
+    } catch (error) {
+      this.emitFileOperationState(progress, 'failed', `Upload failed for ${input.remotePath}`, {
+        error: getErrorMessage(error, `Unable to upload into ${input.remotePath}`),
+        retryable: true,
+      });
+      throw error;
+    }
   }
 
-  async downloadEntry(remotePath: string, localPath: string): Promise<void> {
-    const sftp = await this.getTransferSftp();
-    const stats = await this.statPath(remotePath, sftp);
-    if (isDirectory(stats.mode)) {
-      await this.downloadDirectory(remotePath, localPath, sftp);
-      return;
+  async downloadEntry(input: DownloadRemoteEntryInput): Promise<FileOperationResult> {
+    const transfer = await this.getTransferSftpHandle();
+    const conflicts = transfer.sftp
+      ? await this.collectDownloadConflicts(input.remotePath, input.localPath, transfer.sftp)
+      : await this.collectDownloadConflictsWithShell(input.remotePath, input.localPath);
+    if (conflicts.length > 0 && (input.conflictStrategy ?? 'ask') === 'ask') {
+      return { status: 'conflict', conflicts };
     }
 
-    await fs.mkdir(path.dirname(localPath), { recursive: true });
-    await pipeline(this.createRemoteReadStream(remotePath, sftp), createWriteStream(localPath));
+    const progress = this.createFileOperationProgress(
+      input.operationId,
+      'download',
+      input.remotePath,
+      input.localPath,
+      transfer.sftp
+        ? await this.countRemoteItems(input.remotePath, transfer.sftp)
+        : await this.countRemoteItemsWithShell(input.remotePath),
+    );
+
+    this.emitFileOperationState(progress, 'running', `Downloading ${input.remotePath}`);
+    try {
+      if (transfer.sftp) {
+        const stats = await this.statPath(input.remotePath, transfer.sftp);
+        if (isDirectory(stats.mode)) {
+          await this.downloadDirectory(
+            input.remotePath,
+            input.localPath,
+            transfer.sftp,
+            progress,
+            input.conflictStrategy ?? 'ask',
+          );
+        } else {
+          await this.downloadRemoteFile(
+            input.remotePath,
+            input.localPath,
+            transfer.sftp,
+            progress,
+            input.conflictStrategy ?? 'ask',
+          );
+        }
+      } else {
+        const remoteKind = await this.getRemoteEntryKindWithShell(input.remotePath);
+        if (remoteKind === 'directory') {
+          await this.downloadDirectoryWithShell(
+            input.remotePath,
+            input.localPath,
+            progress,
+            input.conflictStrategy ?? 'ask',
+          );
+        } else {
+          await this.downloadRemoteFileWithShell(
+            input.remotePath,
+            input.localPath,
+            progress,
+            input.conflictStrategy ?? 'ask',
+          );
+        }
+      }
+      this.emitFileOperationState(progress, 'completed', `Downloaded ${input.remotePath}`);
+      return {
+        status: 'completed',
+        skippedItems: progress.skippedItems,
+      };
+    } catch (error) {
+      this.emitFileOperationState(progress, 'failed', `Download failed for ${input.remotePath}`, {
+        error: getErrorMessage(error, `Unable to download ${input.remotePath}`),
+        retryable: true,
+      });
+      throw error;
+    }
   }
 
   async searchInFiles(input: SearchRemoteFilesInput): Promise<SearchRemoteFilesResult> {
@@ -637,8 +915,7 @@ export class SshSessionManager {
         return;
       }
 
-      const stats = await this.statPath(remotePath);
-      if (isDirectory(stats.mode)) {
+      if ((await this.getRemoteEntryKind(remotePath)) === 'directory') {
         const entries = await this.readDir(remotePath);
         for (const entry of entries) {
           await visit(entry.path);
@@ -1318,6 +1595,71 @@ export class SshSessionManager {
     }
   }
 
+  private emitFileOperationEvent(payload: FileOperationEvent): void {
+    for (const listener of this.fileOperationListeners) {
+      listener(payload);
+    }
+  }
+
+  private createFileOperationProgress(
+    operationId: string,
+    kind: FileOperationEvent['kind'],
+    sourcePath: string,
+    targetPath: string,
+    totalItems: number,
+  ): FileOperationProgress {
+    return {
+      operationId,
+      kind,
+      sourcePath,
+      targetPath,
+      totalItems: Math.max(totalItems, 1),
+      completedItems: 0,
+      skippedItems: 0,
+    };
+  }
+
+  private emitFileOperationState(
+    progress: FileOperationProgress,
+    status: FileOperationEvent['status'],
+    message: string,
+    extras?: Pick<FileOperationEvent, 'currentPath' | 'error' | 'retryable'>,
+  ): void {
+    this.emitFileOperationEvent({
+      operationId: progress.operationId,
+      kind: progress.kind,
+      status,
+      sourcePath: progress.sourcePath,
+      targetPath: progress.targetPath,
+      message,
+      completedItems: progress.completedItems,
+      totalItems: progress.totalItems,
+      skippedItems: progress.skippedItems,
+      currentPath: extras?.currentPath,
+      error: extras?.error,
+      retryable: extras?.retryable,
+    });
+  }
+
+  private advanceFileOperation(
+    progress: FileOperationProgress,
+    currentPath: string,
+    skipped = false,
+    amount = 1,
+  ): void {
+    if (skipped) {
+      progress.skippedItems += amount;
+    } else {
+      progress.completedItems += amount;
+    }
+    this.emitFileOperationState(
+      progress,
+      'running',
+      `${progress.kind === 'delete' ? 'Deleting' : progress.kind === 'upload' ? 'Transferring' : 'Downloading'} ${currentPath}`,
+      { currentPath },
+    );
+  }
+
   private requireInteractiveClient(): SshClient {
     if (!this.interactiveClient) {
       throw new Error('No active SSH connection');
@@ -1370,6 +1712,67 @@ export class SshSessionManager {
     });
   }
 
+  private async writeRemoteStreamWithShell(remotePath: string, input: NodeJS.ReadableStream): Promise<void> {
+    const client = this.requireInteractiveClient();
+    const command = `cat > ${quoteForShell(remotePath)}`;
+
+    await new Promise<void>((resolve, reject) => {
+      client.exec(command, (error, stream) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        let settled = false;
+        let stderr = '';
+        let pipelineFinished = false;
+        let streamClosed = false;
+        let exitCode: number | null = null;
+
+        const rejectOnce = (nextError: unknown) => {
+          if (settled) {
+            return;
+          }
+
+          settled = true;
+          reject(nextError instanceof Error ? nextError : new Error(String(nextError)));
+        };
+
+        const resolveOnce = () => {
+          if (settled || !pipelineFinished || !streamClosed) {
+            return;
+          }
+
+          if (exitCode !== 0) {
+            rejectOnce(new Error(stderr.trim() || `Unable to write ${remotePath}`));
+            return;
+          }
+
+          settled = true;
+          resolve();
+        };
+
+        stream.stderr.on('data', (chunk: Buffer | string) => {
+          stderr += chunk.toString();
+        });
+        stream.on('error', rejectOnce);
+        stream.on('close', (code: number | null) => {
+          streamClosed = true;
+          exitCode = code;
+          resolveOnce();
+        });
+        input.on('error', rejectOnce);
+
+        void pipeline(input, stream)
+          .then(() => {
+            pipelineFinished = true;
+            resolveOnce();
+          })
+          .catch(rejectOnce);
+      });
+    });
+  }
+
   private async resolveHomeDirectoryWithShell(): Promise<string> {
     try {
       const { stdout, exitCode } = await this.execRemoteCommand('pwd -P');
@@ -1393,6 +1796,24 @@ export class SshSessionManager {
 
     const authMethod = input.authMethod ?? 'password';
     const hostVerification = input.hostVerification ?? 'off';
+
+    if (authMethod === 'tailscale') {
+      config.readyTimeout = 120000;
+      config.authHandler = (authsLeft, _partialSuccess, next) => {
+        const remainingAuths = authsLeft ?? ['none'];
+        if (remainingAuths.includes('none')) {
+          next('none');
+          return;
+        }
+        if (remainingAuths.includes('keyboard-interactive')) {
+          next('keyboard-interactive');
+          return;
+        }
+        next(remainingAuths[0] ?? 'none');
+      };
+      config.tryKeyboard = true;
+      return config;
+    }
 
     if (hostVerification === 'knownHosts') {
       const knownHostsPath = input.knownHostsPath?.trim() ?? '';
@@ -1665,7 +2086,12 @@ export class SshSessionManager {
   }
 
   private async writeRemoteFile(remotePath: string, content: string, sftp?: SFTPWrapper): Promise<void> {
-    const targetSftp = sftp ?? this.requireSftp();
+    const targetSftp = sftp ?? this.sftp;
+
+    if (!targetSftp) {
+      await this.writeRemoteStreamWithShell(remotePath, Readable.from([content]));
+      return;
+    }
 
     await new Promise<void>((resolve, reject) => {
       targetSftp.writeFile(remotePath, content, { encoding: 'utf8', mode: 0o644 }, (error?: Error | null) => {
@@ -1680,7 +2106,16 @@ export class SshSessionManager {
   }
 
   private async renamePath(fromPath: string, toPath: string): Promise<void> {
-    const sftp = this.requireSftp();
+    const sftp = this.sftp;
+
+    if (!sftp) {
+      const command = [`from=${quoteForShell(fromPath)}`, `to=${quoteForShell(toPath)}`, 'mv "$from" "$to"'].join('\n');
+      const { stderr, exitCode } = await this.execRemoteCommand(command);
+      if (exitCode !== 0) {
+        throw new Error(stderr.trim() || `Unable to rename ${fromPath}`);
+      }
+      return;
+    }
 
     await new Promise<void>((resolve, reject) => {
       sftp.rename(fromPath, toPath, (error: Error | null | undefined) => {
@@ -1710,7 +2145,16 @@ export class SshSessionManager {
   }
 
   private async unlinkIfExists(remotePath: string): Promise<void> {
-    const sftp = this.requireSftp();
+    const sftp = this.sftp;
+
+    if (!sftp) {
+      const command = [`target=${quoteForShell(remotePath)}`, 'rm -f "$target"'].join('\n');
+      const { stderr, exitCode } = await this.execRemoteCommand(command);
+      if (exitCode !== 0) {
+        throw new Error(stderr.trim() || `Unable to remove ${remotePath}`);
+      }
+      return;
+    }
 
     const exists = await new Promise<boolean>((resolve) => {
       sftp.exists(remotePath, (hasError) => {
@@ -1769,13 +2213,69 @@ export class SshSessionManager {
     return targetSftp.createReadStream(remotePath);
   }
 
+  private createRemoteReadStreamWithShell(remotePath: string) {
+    const client = this.requireInteractiveClient();
+    const command = [`target=${quoteForShell(remotePath)}`, 'cat "$target"'].join('\n');
+    const output = new PassThrough();
+
+    void new Promise<void>((resolve, reject) => {
+      client.exec(command, (error, stream) => {
+        if (error) {
+          reject(error);
+          output.destroy(error);
+          return;
+        }
+
+        let stderr = '';
+        stream.stderr.on('data', (chunk: Buffer | string) => {
+          stderr += chunk.toString();
+        });
+        stream.on('error', (streamError: Error) => {
+          output.destroy(streamError);
+          reject(streamError);
+        });
+        stream.on('close', (exitCode: number | null) => {
+          if (exitCode !== 0) {
+            const nextError = new Error(stderr.trim() || `Unable to read ${remotePath}`);
+            output.destroy(nextError);
+            reject(nextError);
+            return;
+          }
+          resolve();
+        });
+        stream.pipe(output);
+      });
+    }).catch((error) => {
+      output.destroy(error instanceof Error ? error : new Error(String(error)));
+    });
+
+    return output;
+  }
+
   private createRemoteWriteStream(remotePath: string, sftp?: SFTPWrapper) {
     const targetSftp = sftp ?? this.requireSftp();
     return targetSftp.createWriteStream(remotePath, { mode: 0o644 });
   }
 
   private async ensureRemoteDirectory(remotePath: string, sftp?: SFTPWrapper): Promise<void> {
-    const targetSftp = sftp ?? this.requireSftp();
+    const targetSftp = sftp ?? this.sftp;
+    if (!targetSftp) {
+      const normalized = path.posix.normalize(remotePath);
+      const command = [
+        `dir=${quoteForShell(normalized)}`,
+        'if [ -e "$dir" ] && [ ! -d "$dir" ]; then',
+        'printf "%s exists and is not a directory\\n" "$dir" >&2',
+        'exit 1',
+        'fi',
+        'mkdir -p -- "$dir"',
+      ].join('\n');
+      const { stderr, exitCode } = await this.execRemoteCommand(command);
+      if (exitCode !== 0) {
+        throw new Error(stderr.trim() || `Unable to create directory ${normalized}`);
+      }
+      return;
+    }
+
     const normalized = path.posix.normalize(remotePath);
     const parts = normalized.split('/').filter(Boolean);
     let current = normalized.startsWith('/') ? '/' : '';
@@ -1814,38 +2314,204 @@ export class SshSessionManager {
     }
   }
 
-  private async uploadLocalFile(localPath: string, remotePath: string, sftp?: SFTPWrapper): Promise<void> {
-    const targetSftp = sftp ?? this.requireSftp();
-    await this.ensureRemoteDirectory(path.posix.dirname(remotePath), targetSftp);
-    await pipeline(createReadStream(localPath), this.createRemoteWriteStream(remotePath, targetSftp));
+  private async uploadLocalFile(
+    localPath: string,
+    remotePath: string,
+    sftp?: SFTPWrapper,
+    progress?: FileOperationProgress,
+    conflictStrategy: FileConflictStrategy = 'ask',
+  ): Promise<void> {
+    const targetSftp = sftp ?? this.sftp;
+    if (await this.remotePathExists(remotePath, targetSftp ?? undefined)) {
+      if ((await this.getRemoteEntryKind(remotePath, targetSftp ?? undefined)) === 'directory') {
+        if (conflictStrategy === 'skip') {
+          if (progress) {
+            this.advanceFileOperation(progress, remotePath, true);
+          }
+          return;
+        }
+        await this.deleteRemotePath(remotePath);
+      } else if (conflictStrategy === 'skip') {
+        if (progress) {
+          this.advanceFileOperation(progress, remotePath, true);
+        }
+        return;
+      }
+    }
+    await this.ensureRemoteDirectory(path.posix.dirname(remotePath), targetSftp ?? undefined);
+    if (targetSftp) {
+      await pipeline(createReadStream(localPath), this.createRemoteWriteStream(remotePath, targetSftp));
+    } else {
+      await this.writeRemoteStreamWithShell(remotePath, createReadStream(localPath));
+    }
+    if (progress) {
+      this.advanceFileOperation(progress, remotePath);
+    }
   }
 
-  private async uploadLocalDirectory(localPath: string, remotePath: string, sftp?: SFTPWrapper): Promise<void> {
-    const targetSftp = sftp ?? this.requireSftp();
-    await this.ensureRemoteDirectory(remotePath, targetSftp);
+  private async uploadLocalDirectory(
+    localPath: string,
+    remotePath: string,
+    sftp?: SFTPWrapper,
+    progress?: FileOperationProgress,
+    conflictStrategy: FileConflictStrategy = 'ask',
+  ): Promise<void> {
+    const targetSftp = sftp ?? this.sftp;
+    if (await this.remotePathExists(remotePath, targetSftp ?? undefined)) {
+      if ((await this.getRemoteEntryKind(remotePath, targetSftp ?? undefined)) !== 'directory') {
+        if (conflictStrategy === 'skip') {
+          const summary = await this.summarizeLocalPath(localPath);
+          if (progress) {
+            this.advanceFileOperation(progress, remotePath, true, summary.files);
+          }
+          return;
+        }
+        await this.deleteRemotePath(remotePath);
+      } else if (conflictStrategy === 'skip') {
+        const summary = await this.summarizeLocalPath(localPath);
+        if (progress) {
+          this.advanceFileOperation(progress, remotePath, true, summary.files);
+        }
+        return;
+      }
+    }
+    await this.ensureRemoteDirectory(remotePath, targetSftp ?? undefined);
     const entries = await fs.readdir(localPath, { withFileTypes: true });
     for (const entry of entries) {
       const nextLocalPath = path.join(localPath, entry.name);
       const nextRemotePath = path.posix.join(remotePath, entry.name);
       if (entry.isDirectory()) {
-        await this.uploadLocalDirectory(nextLocalPath, nextRemotePath, targetSftp);
+        await this.uploadLocalDirectory(nextLocalPath, nextRemotePath, targetSftp ?? undefined, progress, conflictStrategy);
       } else if (entry.isFile()) {
-        await this.uploadLocalFile(nextLocalPath, nextRemotePath, targetSftp);
+        await this.uploadLocalFile(nextLocalPath, nextRemotePath, targetSftp ?? undefined, progress, conflictStrategy);
       }
     }
   }
 
-  private async downloadDirectory(remotePath: string, localPath: string, sftp?: SFTPWrapper): Promise<void> {
+  private async downloadRemoteFile(
+    remotePath: string,
+    localPath: string,
+    sftp?: SFTPWrapper,
+    progress?: FileOperationProgress,
+    conflictStrategy: FileConflictStrategy = 'ask',
+  ): Promise<void> {
+    if (await this.localPathExists(localPath)) {
+      const localStats = await fsLstat(localPath);
+      if (localStats.isDirectory()) {
+        if (conflictStrategy === 'skip') {
+          if (progress) {
+            this.advanceFileOperation(progress, localPath, true);
+          }
+          return;
+        }
+        await fs.rm(localPath, { recursive: true, force: true });
+      } else if (conflictStrategy === 'skip') {
+        if (progress) {
+          this.advanceFileOperation(progress, localPath, true);
+        }
+        return;
+      }
+    }
+
+    await fs.mkdir(path.dirname(localPath), { recursive: true });
+    await pipeline(this.createRemoteReadStream(remotePath, sftp), createWriteStream(localPath));
+    if (progress) {
+      this.advanceFileOperation(progress, localPath);
+    }
+  }
+
+  private async downloadRemoteFileWithShell(
+    remotePath: string,
+    localPath: string,
+    progress?: FileOperationProgress,
+    conflictStrategy: FileConflictStrategy = 'ask',
+  ): Promise<void> {
+    if (await this.localPathExists(localPath)) {
+      const localStats = await fsLstat(localPath);
+      if (localStats.isDirectory()) {
+        if (conflictStrategy === 'skip') {
+          if (progress) {
+            this.advanceFileOperation(progress, localPath, true);
+          }
+          return;
+        }
+        await fs.rm(localPath, { recursive: true, force: true });
+      } else if (conflictStrategy === 'skip') {
+        if (progress) {
+          this.advanceFileOperation(progress, localPath, true);
+        }
+        return;
+      }
+    }
+
+    await fs.mkdir(path.dirname(localPath), { recursive: true });
+    await pipeline(this.createRemoteReadStreamWithShell(remotePath), createWriteStream(localPath));
+    if (progress) {
+      this.advanceFileOperation(progress, localPath);
+    }
+  }
+
+  private async downloadDirectory(
+    remotePath: string,
+    localPath: string,
+    sftp?: SFTPWrapper,
+    progress?: FileOperationProgress,
+    conflictStrategy: FileConflictStrategy = 'ask',
+  ): Promise<void> {
     const targetSftp = sftp ?? this.requireSftp();
+    if (await this.localPathExists(localPath)) {
+      const localStats = await fsLstat(localPath);
+      if (!localStats.isDirectory()) {
+        if (conflictStrategy === 'skip') {
+          const skipped = await this.countRemoteItems(remotePath, targetSftp);
+          if (progress) {
+            this.advanceFileOperation(progress, localPath, true, skipped);
+          }
+          return;
+        }
+        await fs.rm(localPath, { recursive: true, force: true });
+      }
+    }
     await fs.mkdir(localPath, { recursive: true });
     const entries = await this.readDirWithSftp(remotePath, targetSftp);
     for (const entry of entries) {
       const nextLocalPath = path.join(localPath, entry.name);
       if (entry.kind === 'directory') {
-        await this.downloadDirectory(entry.path, nextLocalPath, targetSftp);
+        await this.downloadDirectory(entry.path, nextLocalPath, targetSftp, progress, conflictStrategy);
       } else {
-        await fs.mkdir(path.dirname(nextLocalPath), { recursive: true });
-        await pipeline(this.createRemoteReadStream(entry.path, targetSftp), createWriteStream(nextLocalPath));
+        await this.downloadRemoteFile(entry.path, nextLocalPath, targetSftp, progress, conflictStrategy);
+      }
+    }
+  }
+
+  private async downloadDirectoryWithShell(
+    remotePath: string,
+    localPath: string,
+    progress?: FileOperationProgress,
+    conflictStrategy: FileConflictStrategy = 'ask',
+  ): Promise<void> {
+    if (await this.localPathExists(localPath)) {
+      const localStats = await fsLstat(localPath);
+      if (!localStats.isDirectory()) {
+        if (conflictStrategy === 'skip') {
+          const skipped = await this.countRemoteItemsWithShell(remotePath);
+          if (progress) {
+            this.advanceFileOperation(progress, localPath, true, skipped);
+          }
+          return;
+        }
+        await fs.rm(localPath, { recursive: true, force: true });
+      }
+    }
+
+    await fs.mkdir(localPath, { recursive: true });
+    const entries = await this.readDirWithShell(remotePath);
+    for (const entry of entries) {
+      const nextLocalPath = path.join(localPath, entry.name);
+      if (entry.kind === 'directory') {
+        await this.downloadDirectoryWithShell(entry.path, nextLocalPath, progress, conflictStrategy);
+      } else {
+        await this.downloadRemoteFileWithShell(entry.path, nextLocalPath, progress, conflictStrategy);
       }
     }
   }
@@ -1928,37 +2594,282 @@ export class SshSessionManager {
       });
   }
 
-  private async deleteRemotePath(remotePath: string): Promise<void> {
-    const stats = await this.lstatPath(remotePath);
-    if (isDirectory(stats.mode)) {
+  private async deleteRemotePath(remotePath: string, progress?: FileOperationProgress): Promise<void> {
+    if ((await this.getRemoteEntryKind(remotePath)) === 'directory') {
       const entries = await this.readDir(remotePath);
       for (const entry of entries) {
-        await this.deleteRemotePath(entry.path);
+        await this.deleteRemotePath(entry.path, progress);
       }
 
-      await new Promise<void>((resolve, reject) => {
-        this.requireSftp().rmdir(remotePath, (error?: Error | null) => {
-          if (error) {
-            reject(error);
-            return;
-          }
+      if (this.sftp) {
+        await new Promise<void>((resolve, reject) => {
+          this.sftp!.rmdir(remotePath, (error?: Error | null) => {
+            if (error) {
+              reject(error);
+              return;
+            }
 
-          resolve();
+            resolve();
+          });
         });
-      });
+      } else {
+        const command = [`target=${quoteForShell(remotePath)}`, 'rmdir "$target"'].join('\n');
+        const { stderr, exitCode } = await this.execRemoteCommand(command);
+        if (exitCode !== 0) {
+          throw new Error(stderr.trim() || `Unable to remove ${remotePath}`);
+        }
+      }
+      if (progress) {
+        this.advanceFileOperation(progress, remotePath);
+      }
       return;
     }
 
-    await new Promise<void>((resolve, reject) => {
-      this.requireSftp().unlink(remotePath, (error?: Error | null) => {
-        if (error) {
-          reject(error);
-          return;
-        }
+    await this.unlinkIfExists(remotePath);
+    if (progress) {
+      this.advanceFileOperation(progress, remotePath);
+    }
+  }
 
-        resolve();
-      });
-    });
+  private async countLocalItems(localPaths: string[]): Promise<number> {
+    let total = 0;
+    for (const localPath of localPaths) {
+      total += await this.countLocalPath(localPath);
+    }
+    return total;
+  }
+
+  private async summarizeLocalPath(localPath: string): Promise<LocalPathSummary> {
+    const stats = await fs.stat(localPath);
+    if (stats.isFile()) {
+      return { files: 1, directories: 0 };
+    }
+    if (!stats.isDirectory()) {
+      return { files: 0, directories: 0 };
+    }
+    const entries = await fs.readdir(localPath, { withFileTypes: true });
+    let files = 0;
+    let directories = 1;
+    for (const entry of entries) {
+      const summary = await this.summarizeLocalPath(path.join(localPath, entry.name));
+      files += summary.files;
+      directories += summary.directories;
+    }
+    return { files, directories };
+  }
+
+  private async countLocalPath(localPath: string): Promise<number> {
+    const stats = await fs.stat(localPath);
+    if (stats.isFile()) {
+      return 1;
+    }
+    if (!stats.isDirectory()) {
+      return 0;
+    }
+    const entries = await fs.readdir(localPath, { withFileTypes: true });
+    let total = 0;
+    for (const entry of entries) {
+      total += await this.countLocalPath(path.join(localPath, entry.name));
+    }
+    return total;
+  }
+
+  private async countRemoteItems(
+    remotePath: string,
+    sftp?: SFTPWrapper,
+    includeDirectories = false,
+  ): Promise<number> {
+    const targetSftp = sftp ?? this.sftp;
+    if ((await this.getRemoteEntryKind(remotePath, targetSftp ?? undefined)) === 'file') {
+      return 1;
+    }
+    const entries = targetSftp
+      ? await this.readDirWithSftp(remotePath, targetSftp)
+      : await this.readDirWithShell(remotePath);
+    let total = includeDirectories ? 1 : 0;
+    for (const entry of entries) {
+      total += await this.countRemoteItems(entry.path, targetSftp ?? undefined, includeDirectories);
+    }
+    return total;
+  }
+
+  private async countRemoteItemsWithShell(remotePath: string, includeDirectories = false): Promise<number> {
+    const entryKind = await this.getRemoteEntryKindWithShell(remotePath);
+    if (entryKind === 'file') {
+      return 1;
+    }
+
+    const entries = await this.readDirWithShell(remotePath);
+    let total = includeDirectories ? 1 : 0;
+    for (const entry of entries) {
+      total += await this.countRemoteItemsWithShell(entry.path, includeDirectories);
+    }
+    return total;
+  }
+
+  private async localPathExists(localPath: string): Promise<boolean> {
+    try {
+      await fsLstat(localPath);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async remotePathExists(remotePath: string, sftp?: SFTPWrapper): Promise<boolean> {
+    const targetSftp = sftp ?? this.sftp;
+    if (!targetSftp) {
+      const { exitCode } = await this.execRemoteCommand(`[ -e ${quoteForShell(remotePath)} ]`);
+      return exitCode === 0;
+    }
+
+    try {
+      await this.statPath(remotePath, targetSftp);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async getRemoteEntryKind(remotePath: string, sftp?: SFTPWrapper): Promise<'file' | 'directory'> {
+    const targetSftp = sftp ?? this.sftp;
+    if (!targetSftp) {
+      return this.getRemoteEntryKindWithShell(remotePath);
+    }
+
+    const stats = await this.statPath(remotePath, targetSftp);
+    return isDirectory(stats.mode) ? 'directory' : 'file';
+  }
+
+  private async getRemoteEntryKindWithShell(remotePath: string): Promise<'file' | 'directory'> {
+    const command = `[ -d ${quoteForShell(remotePath)} ] && printf directory || printf file`;
+    const { stdout, stderr, exitCode } = await this.execRemoteCommand(command);
+    if (exitCode !== 0) {
+      throw new Error(stderr.trim() || `Unable to inspect ${remotePath}`);
+    }
+    return stdout.trim() === 'directory' ? 'directory' : 'file';
+  }
+
+  private async collectUploadConflicts(
+    localPaths: string[],
+    remotePath: string,
+    sftp?: SFTPWrapper,
+  ): Promise<FileConflictItem[]> {
+    const conflicts: FileConflictItem[] = [];
+    for (const localPath of localPaths) {
+      const targetPath = path.posix.join(remotePath, normalizeLocalName(localPath));
+      await this.collectUploadConflictsForPath(localPath, targetPath, conflicts, sftp);
+    }
+    return conflicts;
+  }
+
+  private async collectUploadConflictsForPath(
+    localPath: string,
+    remotePath: string,
+    conflicts: FileConflictItem[],
+    sftp?: SFTPWrapper,
+  ): Promise<void> {
+    const targetSftp = sftp ?? this.sftp;
+    const stats = await fs.stat(localPath);
+    const remoteExists = await this.remotePathExists(remotePath, targetSftp ?? undefined);
+    if (stats.isFile()) {
+      if (remoteExists) {
+        conflicts.push({ path: remotePath, kind: 'file' });
+      }
+      return;
+    }
+    if (!stats.isDirectory()) {
+      return;
+    }
+    if (remoteExists) {
+      if ((await this.getRemoteEntryKind(remotePath, targetSftp ?? undefined)) !== 'directory') {
+        conflicts.push({ path: remotePath, kind: 'file' });
+        return;
+      }
+    }
+    const entries = await fs.readdir(localPath, { withFileTypes: true });
+    for (const entry of entries) {
+      await this.collectUploadConflictsForPath(
+        path.join(localPath, entry.name),
+        path.posix.join(remotePath, entry.name),
+        conflicts,
+        targetSftp ?? undefined,
+      );
+    }
+  }
+
+  private async collectDownloadConflicts(
+    remotePath: string,
+    localPath: string,
+    sftp: SFTPWrapper,
+  ): Promise<FileConflictItem[]> {
+    const conflicts: FileConflictItem[] = [];
+    await this.collectDownloadConflictsForPath(remotePath, localPath, conflicts, sftp);
+    return conflicts;
+  }
+
+  private async collectDownloadConflictsForPath(
+    remotePath: string,
+    localPath: string,
+    conflicts: FileConflictItem[],
+    sftp: SFTPWrapper,
+  ): Promise<void> {
+    const stats = await this.statPath(remotePath, sftp);
+    if (!isDirectory(stats.mode)) {
+      if (await this.localPathExists(localPath)) {
+        conflicts.push({ path: localPath, kind: 'file' });
+      }
+      return;
+    }
+
+    if (await this.localPathExists(localPath)) {
+      const localStats = await fsLstat(localPath);
+      if (!localStats.isDirectory()) {
+        conflicts.push({ path: localPath, kind: 'file' });
+        return;
+      }
+    }
+
+    const entries = await this.readDirWithSftp(remotePath, sftp);
+    for (const entry of entries) {
+      await this.collectDownloadConflictsForPath(entry.path, path.join(localPath, entry.name), conflicts, sftp);
+    }
+  }
+
+  private async collectDownloadConflictsWithShell(
+    remotePath: string,
+    localPath: string,
+  ): Promise<FileConflictItem[]> {
+    const conflicts: FileConflictItem[] = [];
+    await this.collectDownloadConflictsForPathWithShell(remotePath, localPath, conflicts);
+    return conflicts;
+  }
+
+  private async collectDownloadConflictsForPathWithShell(
+    remotePath: string,
+    localPath: string,
+    conflicts: FileConflictItem[],
+  ): Promise<void> {
+    const entryKind = await this.getRemoteEntryKindWithShell(remotePath);
+    if (entryKind === 'file') {
+      if (await this.localPathExists(localPath)) {
+        conflicts.push({ path: localPath, kind: 'file' });
+      }
+      return;
+    }
+
+    if (await this.localPathExists(localPath)) {
+      const localStats = await fsLstat(localPath);
+      if (!localStats.isDirectory()) {
+        conflicts.push({ path: localPath, kind: 'file' });
+        return;
+      }
+    }
+
+    const entries = await this.readDirWithShell(remotePath);
+    for (const entry of entries) {
+      await this.collectDownloadConflictsForPathWithShell(entry.path, path.join(localPath, entry.name), conflicts);
+    }
   }
 
   private async createSftp(client: SshClient): Promise<SFTPWrapper> {
@@ -1993,8 +2904,61 @@ export class SshSessionManager {
     }
   }
 
-  private async createConnectedClient(config: ConnectConfig): Promise<SshClient> {
+  private async createConnectedClient(config: ConnectConfig, metadata?: ConnectMetadata): Promise<SshClient> {
     const client = new Client();
+    let authUrl: string | null = null;
+
+    const emitTailscaleAuthState = (message: string): void => {
+      const nextUrl = extractUrl(message);
+      if (nextUrl) {
+        authUrl = nextUrl;
+      }
+      this.emitConnectionState({
+        ...this.state,
+        state: 'connecting',
+        message,
+        host: this.host ?? config.host,
+        filesystemState: 'idle',
+        authUrl: authUrl ?? undefined,
+        recoveryHint: authUrl ? 'Open the login link, finish Tailscale verification, then wait for SSH to continue.' : undefined,
+        recoverable: true,
+      });
+    };
+
+    if (metadata?.authMethod === 'tailscale') {
+      client.on('banner', (message) => {
+        const trimmed = message.trim();
+        if (trimmed !== '') {
+          emitTailscaleAuthState(trimmed);
+        }
+      });
+      client.on('keyboard-interactive', (name, instructions, _lang, prompts, finish) => {
+        const lines = [name, instructions, ...prompts.map((prompt) => prompt.prompt)]
+          .map((value) => value.trim())
+          .filter((value) => value !== '');
+        if (lines.length > 0) {
+          emitTailscaleAuthState(lines.join('\n'));
+        }
+        finish(prompts.map(() => ''));
+      });
+      client.on('error', (error: Error) => {
+        const message = getErrorMessage(error, 'Tailscale SSH authentication failed');
+        const nextUrl = extractUrl(message);
+        if (nextUrl) {
+          authUrl = nextUrl;
+          this.emitConnectionState({
+            ...this.state,
+            state: 'connecting',
+            message,
+            host: this.host ?? config.host,
+            filesystemState: 'idle',
+            authUrl,
+            recoveryHint: 'Open the login link, finish Tailscale verification, then retry if the session does not continue.',
+            recoverable: true,
+          });
+        }
+      });
+    }
 
     const ready = new Promise<void>((resolve, reject) => {
       client.once('ready', resolve);
@@ -2029,6 +2993,11 @@ export class SshSessionManager {
         connectionId: this.connectionId ?? undefined,
         homeDir,
         filesystemState: 'ready',
+        reason: undefined,
+        diagnosticCode: undefined,
+        recoveryHint: undefined,
+        recoverable: true,
+        authUrl: undefined,
       });
     } catch (error) {
       if (!this.interactiveClient || this.isClosing) {
@@ -2041,11 +3010,16 @@ export class SshSessionManager {
       this.emitConnectionState({
         ...this.state,
         state: 'connected',
-        message: `${getErrorMessage(error, 'Remote file system unavailable')}. Using SSH shell file listing.`,
+        message: `${getErrorMessage(error, 'Remote file system unavailable')}. Using SSH shell fallback for file operations.`,
         host,
         connectionId: this.connectionId ?? undefined,
         homeDir,
         filesystemState: 'ready',
+        reason: undefined,
+        diagnosticCode: undefined,
+        recoveryHint: undefined,
+        recoverable: true,
+        authUrl: undefined,
       });
     } finally {
       this.filesystemInitPromise = null;
@@ -2114,13 +3088,19 @@ export class SshSessionManager {
     });
 
     client.on('error', (error: Error) => {
-      if (this.state.state === 'connected') {
+    if (this.state.state === 'connected') {
+        const diagnostic = classifyConnectionError(error);
         this.emitConnectionState({
           ...this.state,
           state: 'error',
-          message: getErrorMessage(error, 'SSH connection error'),
+          message: `${diagnostic.message}. ${diagnostic.recoveryHint}`,
           host: this.host ?? undefined,
           connectionId: this.connectionId ?? undefined,
+          reason: 'remote',
+          diagnosticCode: diagnostic.code,
+          recoveryHint: diagnostic.recoveryHint,
+          recoverable: diagnostic.recoverable,
+          authUrl: undefined,
         });
       }
     });
@@ -2174,7 +3154,7 @@ export class SshSessionManager {
       const message = getErrorMessage(error, 'Auxiliary SSH session unavailable');
       this.connectionManagerState.auxiliaryState = 'failed';
       this.connectionManagerState.auxiliaryFailureReason = message;
-      console.warn(`Auxiliary SSH session unavailable for ${username}@${host}:`, error);
+      console.info(`Auxiliary SSH session unavailable for ${username}@${host}: ${message}`);
       this.auxiliaryClient = null;
       this.auxiliarySftp = null;
     }
@@ -2237,13 +3217,36 @@ export class SshSessionManager {
     return this.auxiliaryClient ?? this.requireInteractiveClient();
   }
 
-  private async getTransferSftp(): Promise<SFTPWrapper> {
+  private async getTransferSftpHandle(): Promise<TransferSftpHandle> {
     await this.ensureAuxiliaryConnection();
-    return this.auxiliarySftp ?? this.requireSftp();
+    if (this.auxiliarySftp) {
+      return {
+        sftp: this.auxiliarySftp,
+        viaShell: false,
+      };
+    }
+
+    if (this.sftp) {
+      return {
+        sftp: this.sftp,
+        viaShell: false,
+      };
+    }
+
+    return {
+      sftp: null,
+      viaShell: true,
+    };
   }
 
   private async ensureAuxiliaryConnection(): Promise<void> {
     if (!this.interactiveClient || !this.connectionId) {
+      return;
+    }
+
+    if (this.activeConnectMetadata?.authMethod === 'tailscale') {
+      this.connectionManagerState.auxiliaryState = 'failed';
+      this.connectionManagerState.auxiliaryFailureReason = 'Skipped for Tailscale SSH to avoid repeated browser authentication.';
       return;
     }
 
@@ -2279,6 +3282,8 @@ export class SshSessionManager {
       agent: config.agent,
       readyTimeout: config.readyTimeout,
       hostVerifier: config.hostVerifier,
+      tryKeyboard: config.tryKeyboard,
+      authHandler: config.authHandler,
     };
   }
 
@@ -2312,6 +3317,7 @@ export class SshSessionManager {
     }
     this.interactiveClient = null;
     this.activeConnectConfig = null;
+    this.activeConnectMetadata = null;
     this.sftp = null;
     if (this.auxiliaryClient) {
       this.auxiliaryClient.removeAllListeners();
@@ -2333,6 +3339,9 @@ export class SshSessionManager {
       host: this.host ?? undefined,
       connectionId: this.connectionId ?? undefined,
       filesystemState: 'idle',
+      reason: 'remote',
+      recoveryHint: 'Reconnect to resume file and terminal operations.',
+      recoverable: true,
     });
 
     for (const [terminalId] of terminalEntries) {

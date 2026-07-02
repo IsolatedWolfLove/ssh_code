@@ -1,17 +1,25 @@
 import path from 'node:path';
 import { accessSync, constants, existsSync, readdirSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import os from 'node:os';
+import { promisify } from 'node:util';
 
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 
 import { IPC_CHANNELS } from '../shared/contracts';
 import type {
   ConnectInput,
   CreateRemoteEntryInput,
   DeleteRemoteEntryInput,
+  DownloadRemoteEntryInput,
+  FileOperationEvent,
+  FileOperationResult,
   RenameRemoteEntryInput,
   SavedTunnelConfig,
   SaveRemoteFileInput,
   SearchRemoteFilesInput,
+  TailscaleHostSummary,
+  UploadLocalEntriesInput,
 } from '../shared/contracts';
 import { SavedConnectionStore } from './saved-connections';
 import { SshSessionManager } from './ssh-session';
@@ -22,11 +30,102 @@ interface WindowSession {
   unsubscribeConnectionState: () => void;
   unsubscribeTerminalEvent: () => void;
   unsubscribeTunnelEvent: () => void;
+  unsubscribeFileOperationEvent: () => void;
 }
 
 const windowSessions = new Map<number, WindowSession>();
 let ipcRegistered = false;
 let savedConnectionStore: SavedConnectionStore | null = null;
+const execFileAsync = promisify(execFile);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function readString(record: Record<string, unknown>, key: string): string {
+  const value = record[key];
+  return typeof value === 'string' ? value : '';
+}
+
+function readBoolean(record: Record<string, unknown>, key: string): boolean {
+  return record[key] === true;
+}
+
+function readStringArray(record: Record<string, unknown>, key: string): string[] {
+  const value = record[key];
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+
+function getCommandErrorMessage(error: unknown, fallback: string): string {
+  if (isRecord(error)) {
+    const stderr = readString(error, 'stderr').trim();
+    if (stderr !== '') {
+      return stderr;
+    }
+    const message = readString(error, 'message').trim();
+    if (message !== '') {
+      return message;
+    }
+  }
+
+  return fallback;
+}
+
+function normalizeDnsName(value: string): string {
+  return value.replace(/\.$/, '');
+}
+
+function toTailscaleHostSummary(id: string, value: unknown): TailscaleHostSummary | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const dnsName = normalizeDnsName(readString(value, 'DNSName'));
+  const hostName = readString(value, 'HostName');
+  const ip = readStringArray(value, 'TailscaleIPs')[0] ?? '';
+  const host = ip || dnsName || hostName;
+  if (host === '') {
+    return null;
+  }
+
+  return {
+    id,
+    host,
+    displayName: hostName || dnsName.split('.')[0] || host,
+    dnsName: dnsName || undefined,
+    ip: ip || undefined,
+    os: readString(value, 'OS') || undefined,
+    online: readBoolean(value, 'Online'),
+    active: readBoolean(value, 'Active'),
+    sshUser: os.userInfo().username || undefined,
+  };
+}
+
+async function listTailscaleHosts(): Promise<TailscaleHostSummary[]> {
+  try {
+    const { stdout } = await execFileAsync('tailscale', ['status', '--json'], {
+      timeout: 10000,
+      maxBuffer: 1024 * 1024,
+    });
+    const payload = JSON.parse(stdout) as unknown;
+    const peerMap = isRecord(payload) && isRecord(payload.Peer) ? payload.Peer : {};
+
+    return Object.entries(peerMap)
+      .map(([id, value]) => toTailscaleHostSummary(id, value))
+      .filter((item): item is TailscaleHostSummary => item !== null)
+      .sort((left, right) => {
+        if (left.online !== right.online) {
+          return left.online ? -1 : 1;
+        }
+        if (left.active !== right.active) {
+          return left.active ? -1 : 1;
+        }
+        return left.displayName.localeCompare(right.displayName);
+      });
+  } catch (error) {
+    throw new Error(getCommandErrorMessage(error, 'Unable to load Tailscale hosts'));
+  }
+}
 
 function canAccessPath(devicePath: string): boolean {
   try {
@@ -80,6 +179,10 @@ function shouldDisableHardwareAcceleration(): boolean {
 
 if (shouldDisableHardwareAcceleration()) {
   app.disableHardwareAcceleration();
+}
+
+if (process.platform === 'linux') {
+  app.commandLine.appendSwitch('disable-features', 'VaapiVideoDecoder,VaapiVideoEncoder,UseChromeOSDirectVideoDecoder');
 }
 
 process.on('unhandledRejection', (error) => {
@@ -138,6 +241,11 @@ function createMainWindow(): BrowserWindow {
       window.webContents.send(IPC_CHANNELS.tunnelEvent, payload);
     }
   });
+  const unsubscribeFileOperationEvent = sessionManager.onFileOperationEvent((payload) => {
+    if (!window.isDestroyed()) {
+      window.webContents.send(IPC_CHANNELS.fileOperationEvent, payload);
+    }
+  });
 
   windowSessions.set(webContentsId, {
     window,
@@ -145,6 +253,7 @@ function createMainWindow(): BrowserWindow {
     unsubscribeConnectionState,
     unsubscribeTerminalEvent,
     unsubscribeTunnelEvent,
+    unsubscribeFileOperationEvent,
   });
 
   if (process.env.VITE_DEV_SERVER_URL) {
@@ -170,6 +279,7 @@ async function disposeWindowSession(webContentsId: number): Promise<void> {
   session.unsubscribeConnectionState();
   session.unsubscribeTerminalEvent();
   session.unsubscribeTunnelEvent();
+  session.unsubscribeFileOperationEvent();
 
   try {
     await session.sessionManager.disconnect();
@@ -204,6 +314,19 @@ function getBrowserWindow(webContentsId: number): BrowserWindow {
   return session.window;
 }
 
+function normalizeDownloadInput(input: DownloadRemoteEntryInput | string): DownloadRemoteEntryInput {
+  if (typeof input === 'string') {
+    return {
+      operationId: `legacy-${Date.now()}`,
+      remotePath: input,
+      localPath: '',
+      conflictStrategy: 'ask',
+    };
+  }
+
+  return input;
+}
+
 function registerIpc(): void {
   if (ipcRegistered) {
     return;
@@ -213,6 +336,14 @@ function registerIpc(): void {
 
   ipcMain.handle(IPC_CHANNELS.openNewWindow, () => {
     createMainWindow();
+  });
+  ipcMain.handle(IPC_CHANNELS.openExternal, async (_event, url: string) => {
+    const nextUrl = new URL(url);
+    if (!['http:', 'https:'].includes(nextUrl.protocol)) {
+      throw new Error('Only http and https links are supported');
+    }
+
+    await shell.openExternal(nextUrl.toString());
   });
   ipcMain.handle(IPC_CHANNELS.connect, async (event, input: ConnectInput) => {
     const savedConnectionId = getSavedConnectionStore().getConnectionId(input);
@@ -235,6 +366,7 @@ function registerIpc(): void {
     };
   });
   ipcMain.handle(IPC_CHANNELS.disconnect, (event) => getSessionManager(event.sender.id).disconnect());
+  ipcMain.handle(IPC_CHANNELS.tailscaleHostsList, () => listTailscaleHosts());
   ipcMain.handle(IPC_CHANNELS.savedConnectionsList, () => getSavedConnectionStore().listSummaries());
   ipcMain.handle(IPC_CHANNELS.savedConnectionsRemove, (_event, savedConnectionId: string) =>
     getSavedConnectionStore().removeConnection(savedConnectionId),
@@ -263,39 +395,27 @@ function registerIpc(): void {
   ipcMain.handle(IPC_CHANNELS.deleteEntry, (event, input: DeleteRemoteEntryInput) =>
     getSessionManager(event.sender.id).deleteEntry(input),
   );
-  ipcMain.handle(IPC_CHANNELS.uploadLocalEntries, async (event, remotePath: string, localPaths?: string[]) => {
-    const resolvedLocalPaths =
-      localPaths && localPaths.length > 0
-        ? localPaths
-        : (
-            await dialog.showOpenDialog(getBrowserWindow(event.sender.id), {
-              properties: ['openFile', 'openDirectory', 'multiSelections'],
-              title: 'Upload to remote folder',
-            })
-          ).filePaths;
-
-    if (resolvedLocalPaths.length === 0) {
-      return;
-    }
-
-    await getSessionManager(event.sender.id).uploadLocalEntries(resolvedLocalPaths, remotePath);
+  ipcMain.handle(IPC_CHANNELS.uploadLocalEntries, async (event, input: UploadLocalEntriesInput): Promise<FileOperationResult> => {
+    return getSessionManager(event.sender.id).uploadLocalEntries(input);
   });
-  ipcMain.handle(IPC_CHANNELS.downloadEntry, async (event, remotePath: string) => {
-    const result = await dialog.showOpenDialog(getBrowserWindow(event.sender.id), {
-      title: 'Choose download folder',
-      defaultPath: app.getPath('downloads'),
-      properties: ['openDirectory', 'createDirectory'],
-    });
-
-    if (result.canceled || result.filePaths.length === 0) {
-      return;
-    }
-
-    await getSessionManager(event.sender.id).downloadEntry(
-      remotePath,
-      path.join(result.filePaths[0], path.basename(remotePath)),
-    );
-  });
+  ipcMain.handle(
+    IPC_CHANNELS.downloadEntry,
+    async (event, input: DownloadRemoteEntryInput | string): Promise<FileOperationResult> => {
+      const normalizedInput = normalizeDownloadInput(input);
+      if (normalizedInput.localPath.trim() === '') {
+        const result = await dialog.showOpenDialog(getBrowserWindow(event.sender.id), {
+          title: 'Choose download folder',
+          defaultPath: app.getPath('downloads'),
+          properties: ['openDirectory', 'createDirectory'],
+        });
+        if (result.canceled || result.filePaths.length === 0) {
+          return { status: 'completed', skippedItems: 0 };
+        }
+        normalizedInput.localPath = path.join(result.filePaths[0], path.basename(normalizedInput.remotePath));
+      }
+      return getSessionManager(event.sender.id).downloadEntry(normalizedInput);
+    },
+  );
   ipcMain.handle(IPC_CHANNELS.searchInFiles, (event, input: SearchRemoteFilesInput) =>
     getSessionManager(event.sender.id).searchInFiles(input),
   );
@@ -319,6 +439,14 @@ function registerIpc(): void {
       properties: ['openFile', 'openDirectory', 'multiSelections'],
     });
     return result.canceled ? [] : result.filePaths;
+  });
+  ipcMain.handle(IPC_CHANNELS.pickDownloadDirectory, async (event) => {
+    const result = await dialog.showOpenDialog(getBrowserWindow(event.sender.id), {
+      title: 'Choose download folder',
+      defaultPath: app.getPath('downloads'),
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    return result.canceled ? null : (result.filePaths[0] ?? null);
   });
   ipcMain.handle(IPC_CHANNELS.terminalCreate, (event) => getSessionManager(event.sender.id).createTerminal());
   ipcMain.handle(IPC_CHANNELS.terminalWrite, (event, terminalId: string, data: string) =>

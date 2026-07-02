@@ -5,9 +5,11 @@ import type { ElectronApi } from '../shared/electron-api';
 
 const electronApi: ElectronApi = {
   openNewWindow: () => ipcRenderer.invoke(IPC_CHANNELS.openNewWindow),
+  openExternal: (url) => ipcRenderer.invoke(IPC_CHANNELS.openExternal, url),
   connect: (input) => ipcRenderer.invoke(IPC_CHANNELS.connect, input),
   connectSaved: (savedConnectionId) => ipcRenderer.invoke(IPC_CHANNELS.connectSaved, savedConnectionId),
   disconnect: () => ipcRenderer.invoke(IPC_CHANNELS.disconnect),
+  listTailscaleHosts: () => ipcRenderer.invoke(IPC_CHANNELS.tailscaleHostsList),
   listSavedConnections: () => ipcRenderer.invoke(IPC_CHANNELS.savedConnectionsList),
   removeSavedConnection: (savedConnectionId) =>
     ipcRenderer.invoke(IPC_CHANNELS.savedConnectionsRemove, savedConnectionId),
@@ -21,13 +23,13 @@ const electronApi: ElectronApi = {
   createEntry: (input) => ipcRenderer.invoke(IPC_CHANNELS.createEntry, input),
   renameEntry: (input) => ipcRenderer.invoke(IPC_CHANNELS.renameEntry, input),
   deleteEntry: (input) => ipcRenderer.invoke(IPC_CHANNELS.deleteEntry, input),
-  uploadLocalEntries: (remotePath, localPaths) =>
-    ipcRenderer.invoke(IPC_CHANNELS.uploadLocalEntries, remotePath, localPaths),
-  downloadEntry: (remotePath) => ipcRenderer.invoke(IPC_CHANNELS.downloadEntry, remotePath),
+  uploadLocalEntries: (input) => ipcRenderer.invoke(IPC_CHANNELS.uploadLocalEntries, input),
+  downloadEntry: (input) => ipcRenderer.invoke(IPC_CHANNELS.downloadEntry, input),
   searchInFiles: (input) => ipcRenderer.invoke(IPC_CHANNELS.searchInFiles, input),
   pickPrivateKeyPath: () => ipcRenderer.invoke(IPC_CHANNELS.pickPrivateKeyPath),
   pickKnownHostsPath: () => ipcRenderer.invoke(IPC_CHANNELS.pickKnownHostsPath),
   pickUploadEntries: () => ipcRenderer.invoke(IPC_CHANNELS.pickUploadEntries),
+  pickDownloadDirectory: () => ipcRenderer.invoke(IPC_CHANNELS.pickDownloadDirectory),
   createTerminal: () => ipcRenderer.invoke(IPC_CHANNELS.terminalCreate),
   writeTerminal: (terminalId, data) => ipcRenderer.invoke(IPC_CHANNELS.terminalWrite, terminalId, data),
   resizeTerminal: (terminalId, cols, rows) =>
@@ -68,6 +70,16 @@ const electronApi: ElectronApi = {
     ipcRenderer.on(IPC_CHANNELS.connectionState, listener);
     return () => {
       ipcRenderer.removeListener(IPC_CHANNELS.connectionState, listener);
+    };
+  },
+  onFileOperationEvent: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => {
+      callback(payload);
+    };
+
+    ipcRenderer.on(IPC_CHANNELS.fileOperationEvent, listener);
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.fileOperationEvent, listener);
     };
   },
 };

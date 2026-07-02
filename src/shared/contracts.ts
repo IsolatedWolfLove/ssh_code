@@ -1,7 +1,15 @@
 export type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'error';
-export type AuthMethod = 'password' | 'privateKey' | 'agent';
+export type AuthMethod = 'password' | 'privateKey' | 'agent' | 'tailscale';
 export type HostVerificationMode = 'knownHosts' | 'off';
 export type RemoteFileSystemState = 'idle' | 'loading' | 'ready' | 'error';
+export type ConnectionStateReason = 'manual' | 'remote' | 'connectFailed';
+export type ConnectionDiagnosticCode =
+  | 'wrongPassword'
+  | 'hostUnreachable'
+  | 'knownHosts'
+  | 'privateKey'
+  | 'authenticationFailed'
+  | 'unknown';
 
 export interface ConnectInput {
   host: string;
@@ -36,6 +44,18 @@ export interface SavedConnectionSummary {
   tunnels: SavedTunnelConfig[];
 }
 
+export interface TailscaleHostSummary {
+  id: string;
+  host: string;
+  displayName: string;
+  dnsName?: string;
+  ip?: string;
+  os?: string;
+  online: boolean;
+  active: boolean;
+  sshUser?: string;
+}
+
 export interface ConnectionStatePayload {
   state: ConnectionState;
   message: string;
@@ -43,6 +63,11 @@ export interface ConnectionStatePayload {
   connectionId?: string;
   homeDir?: string;
   filesystemState?: RemoteFileSystemState;
+  reason?: ConnectionStateReason;
+  diagnosticCode?: ConnectionDiagnosticCode;
+  recoveryHint?: string;
+  recoverable?: boolean;
+  authUrl?: string;
 }
 
 export interface RemoteDirectoryEntry {
@@ -81,7 +106,56 @@ export interface RenameRemoteEntryInput {
 
 export interface DeleteRemoteEntryInput {
   path: string;
+  operationId?: string;
 }
+
+export type FileOperationKind = 'upload' | 'download' | 'delete';
+export type FileOperationStatus = 'running' | 'completed' | 'failed';
+export type FileConflictStrategy = 'ask' | 'overwrite' | 'skip';
+
+export interface FileConflictItem {
+  path: string;
+  kind: 'file' | 'directory';
+}
+
+export interface FileOperationEvent {
+  operationId: string;
+  kind: FileOperationKind;
+  status: FileOperationStatus;
+  sourcePath: string;
+  targetPath: string;
+  message: string;
+  completedItems: number;
+  totalItems: number;
+  skippedItems: number;
+  currentPath?: string;
+  error?: string;
+  retryable?: boolean;
+}
+
+export interface UploadLocalEntriesInput {
+  operationId: string;
+  remotePath: string;
+  localPaths: string[];
+  conflictStrategy?: FileConflictStrategy;
+}
+
+export interface DownloadRemoteEntryInput {
+  operationId: string;
+  remotePath: string;
+  localPath: string;
+  conflictStrategy?: FileConflictStrategy;
+}
+
+export type FileOperationResult =
+  | {
+      status: 'completed';
+      skippedItems: number;
+    }
+  | {
+      status: 'conflict';
+      conflicts: FileConflictItem[];
+    };
 
 export interface SearchRemoteFilesInput {
   rootPath: string;
@@ -177,9 +251,11 @@ export interface TunnelEvent {
 
 export const IPC_CHANNELS = {
   openNewWindow: 'window:openNew',
+  openExternal: 'shell:openExternal',
   connect: 'ssh:connect',
   connectSaved: 'ssh:connectSaved',
   disconnect: 'ssh:disconnect',
+  tailscaleHostsList: 'tailscale:listHosts',
   savedConnectionsList: 'savedConnections:list',
   savedConnectionsRemove: 'savedConnections:remove',
   savedConnectionsRename: 'savedConnections:rename',
@@ -192,6 +268,7 @@ export const IPC_CHANNELS = {
   deleteEntry: 'sftp:deleteEntry',
   uploadLocalEntries: 'sftp:uploadLocalEntries',
   downloadEntry: 'sftp:downloadEntry',
+  pickDownloadDirectory: 'dialog:pickDownloadDirectory',
   searchInFiles: 'ssh:searchInFiles',
   pickPrivateKeyPath: 'dialog:pickPrivateKeyPath',
   pickKnownHostsPath: 'dialog:pickKnownHostsPath',
@@ -208,4 +285,5 @@ export const IPC_CHANNELS = {
   tunnelsStop: 'tunnels:stop',
   tunnelEvent: 'tunnel:event',
   connectionState: 'connection:state',
+  fileOperationEvent: 'fileOperation:event',
 } as const;

@@ -175,7 +175,8 @@ function isStoredSavedConnection(value: unknown): value is StoredSavedConnection
     (value.authMethod === undefined ||
       value.authMethod === 'password' ||
       value.authMethod === 'privateKey' ||
-      value.authMethod === 'agent') &&
+      value.authMethod === 'agent' ||
+      value.authMethod === 'tailscale') &&
     typeof value.password === 'string' &&
     isOptionalSecretEncoding(value.passwordEncoding) &&
     (value.privateKeyPath === undefined || typeof value.privateKeyPath === 'string') &&

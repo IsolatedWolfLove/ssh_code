@@ -1,0 +1,89 @@
+SSH Studio 最终用户许可协议（EULA）
+
+最后更新日期：2026-07-03
+
+请在安装前仔细阅读本协议。安装、复制或使用 SSH Studio（以下简称“软件”）即表示您已阅读、理解并同意接受本协议约束。如您不同意本协议，请不要安装或使用本软件。
+
+1. 许可范围
+本软件按“许可使用而非出售”的方式提供。您获得的是一项可撤销、非独占、不可转让的许可，可在您拥有或控制的设备上安装和使用本软件，用于合法的个人、学习、测试或业务用途。
+
+2. 所有权
+本软件及其相关的源代码、界面、商标、文档和其他内容的知识产权，仍由作者或相应权利人所有。本协议不向您转让任何所有权。
+
+3. 使用限制
+除非适用法律明确允许，您不得：
+- 反向工程、反汇编、反编译或试图提取本软件的源代码；
+- 删除或修改本软件中的版权、商标或其他权利声明；
+- 将本软件用于任何违法、侵权、恶意攻击、未授权访问或破坏性活动；
+- 以可能损害作者、第三方或系统安全的方式分发、出租、转售或提供本软件。
+
+4. 第三方组件
+本软件可能包含或依赖第三方开源组件。相关组件受其各自许可证约束。若本协议与第三方许可证冲突，以第三方许可证对对应组件的要求为准。
+
+5. 网络与数据
+本软件可能用于连接远程服务器、传输文件或处理凭据。您应自行确保：
+- 您对目标系统和账户拥有合法授权；
+- 您妥善保管凭据、密钥和连接配置；
+- 您遵守适用的法律、行业规范及内部安全要求。
+作者默认不对您通过本软件连接、传输、删除或修改的数据承担责任。
+
+6. 更新与变更
+作者可以随时发布更新、修复或功能调整，也可以在不另行通知的情况下停止维护某些版本。更新后继续使用本软件，视为您接受更新版本所附带的协议与变更。
+
+7. 无担保
+本软件按“现状”和“可用”提供，不提供任何明示或默示担保，包括但不限于适销性、特定用途适用性、稳定性、连续性、安全性或不侵权担保。作者不保证本软件无缺陷、不中断或完全满足您的需求。
+
+8. 责任限制
+在适用法律允许的最大范围内，作者及贡献者不对任何直接、间接、附带、特殊、惩罚性或后果性损害承担责任，包括但不限于利润损失、数据丢失、业务中断、设备故障或安全事件，即使已被告知该等损害的可能性。
+
+9. 终止
+如您违反本协议，作者可立即终止您对本软件的使用许可。许可终止后，您应停止使用并删除已安装的软件及其副本。
+
+10. 适用法律
+本协议受适用法律约束。若本协议某一条款被认定为无效或不可执行，不影响其余条款的效力。
+
+English Version
+
+SSH Studio End User License Agreement (EULA)
+
+Last Updated: 2026-07-03
+
+Please read this agreement carefully before installing the software. By installing, copying, or using SSH Studio (the "Software"), you confirm that you have read, understood, and agreed to be bound by this agreement. If you do not agree, do not install or use the Software.
+
+1. License Grant
+The Software is licensed, not sold. You are granted a revocable, non-exclusive, non-transferable license to install and use the Software on devices you own or control for lawful personal, educational, testing, or business purposes.
+
+2. Ownership
+All intellectual property rights in the Software, including its source code, interface, trademarks, documentation, and related materials, remain with the author or the applicable rights holders. This agreement does not transfer ownership to you.
+
+3. Restrictions
+Except where expressly permitted by applicable law, you may not:
+- reverse engineer, decompile, disassemble, or attempt to derive the source code of the Software;
+- remove or alter any copyright, trademark, or other proprietary notices;
+- use the Software for unlawful, infringing, malicious, unauthorized access, or destructive activities;
+- distribute, rent, resell, or provide the Software in a manner that harms the author, third parties, or system security.
+
+4. Third-Party Components
+The Software may include or depend on third-party open source components. Those components are governed by their own licenses. If this agreement conflicts with a third-party license, the third-party license controls for that component.
+
+5. Network Use and Data
+The Software may be used to connect to remote servers, transfer files, or process credentials. You are responsible for ensuring that:
+- you are authorized to access the target systems and accounts;
+- you protect credentials, keys, and saved connection settings appropriately;
+- you comply with applicable laws, industry rules, and internal security requirements.
+The author is not responsible for data you access, transmit, delete, or modify through the Software.
+
+6. Updates and Changes
+The author may release updates, fixes, or feature changes at any time, and may discontinue maintenance of any version without prior notice. Continued use after an update means you accept the updated terms that accompany that version.
+
+7. Disclaimer of Warranties
+The Software is provided "as is" and "as available" without warranties of any kind, express or implied, including merchantability, fitness for a particular purpose, reliability, availability, security, or non-infringement. The author does not warrant that the Software will be error-free, uninterrupted, or suitable for your needs.
+
+8. Limitation of Liability
+To the maximum extent permitted by law, the author and contributors are not liable for any direct, indirect, incidental, special, punitive, or consequential damages, including loss of profits, loss of data, business interruption, hardware failure, or security incidents, even if advised of the possibility of such damages.
+
+9. Termination
+If you violate this agreement, your license to use the Software may terminate immediately. Upon termination, you must stop using and delete all installed copies of the Software.
+
+10. Governing Law
+This agreement is governed by applicable law. If any provision is held invalid or unenforceable, the remaining provisions remain in effect.

@@ -124,6 +124,11 @@ export const FileTree = memo(function FileTree({
           type="button"
           className={`tree-workspace-button ${selectedPath === workspacePath ? 'tree-workspace-button-selected' : ''}`}
           onClick={() => onSelectPath(workspacePath)}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            onSelectPath(workspacePath);
+            onOpenContextMenu(workspacePath, 'directory', { x: event.clientX, y: event.clientY });
+          }}
           title={workspacePath}
         >
           <div className="tree-workspace-name">{workspaceName}</div>

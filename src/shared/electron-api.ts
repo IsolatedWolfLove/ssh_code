@@ -5,6 +5,9 @@ import type {
   ConnectInput,
   ConnectResult,
   ConnectionStatePayload,
+  DownloadRemoteEntryInput,
+  FileOperationEvent,
+  FileOperationResult,
   RenameRemoteEntryInput,
   RemoteDirectoryEntry,
   RemoteFilePayload,
@@ -14,16 +17,20 @@ import type {
   SavedTunnelConfig,
   SearchRemoteFilesInput,
   SearchRemoteFilesResult,
+  TailscaleHostSummary,
   TerminalEvent,
   TunnelEvent,
   TunnelSnapshot,
+  UploadLocalEntriesInput,
 } from './contracts';
 
 export interface ElectronApi {
   openNewWindow: () => Promise<void>;
+  openExternal: (url: string) => Promise<void>;
   connect: (input: ConnectInput) => Promise<ConnectResult>;
   connectSaved: (savedConnectionId: string) => Promise<ConnectResult>;
   disconnect: () => Promise<void>;
+  listTailscaleHosts: () => Promise<TailscaleHostSummary[]>;
   listSavedConnections: () => Promise<SavedConnectionSummary[]>;
   removeSavedConnection: (savedConnectionId: string) => Promise<void>;
   renameSavedConnection: (savedConnectionId: string, displayName: string) => Promise<void>;
@@ -34,12 +41,13 @@ export interface ElectronApi {
   createEntry: (input: CreateRemoteEntryInput) => Promise<RemoteDirectoryEntry>;
   renameEntry: (input: RenameRemoteEntryInput) => Promise<RemoteDirectoryEntry>;
   deleteEntry: (input: DeleteRemoteEntryInput) => Promise<void>;
-  uploadLocalEntries: (remotePath: string, localPaths?: string[]) => Promise<void>;
-  downloadEntry: (remotePath: string) => Promise<void>;
+  uploadLocalEntries: (input: UploadLocalEntriesInput) => Promise<FileOperationResult>;
+  downloadEntry: (input: DownloadRemoteEntryInput) => Promise<FileOperationResult>;
   searchInFiles: (input: SearchRemoteFilesInput) => Promise<SearchRemoteFilesResult>;
   pickPrivateKeyPath: () => Promise<string | null>;
   pickKnownHostsPath: () => Promise<string | null>;
   pickUploadEntries: () => Promise<string[]>;
+  pickDownloadDirectory: () => Promise<string | null>;
   createTerminal: () => Promise<CreateTerminalResult>;
   writeTerminal: (terminalId: string, data: string) => Promise<void>;
   resizeTerminal: (terminalId: string, cols: number, rows: number) => Promise<void>;
@@ -52,4 +60,5 @@ export interface ElectronApi {
   onTerminalEvent: (callback: (event: TerminalEvent) => void) => () => void;
   onTunnelEvent: (callback: (event: TunnelEvent) => void) => () => void;
   onConnectionState: (callback: (state: ConnectionStatePayload) => void) => () => void;
+  onFileOperationEvent: (callback: (event: FileOperationEvent) => void) => () => void;
 }

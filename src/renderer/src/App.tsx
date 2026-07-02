@@ -1,20 +1,27 @@
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
-import { ChevronDown, CircleAlert, FolderSearch, PlugZap, RefreshCw, Search, Download, Upload, Trash2, PencilLine, TerminalSquare } from 'lucide-react';
+import { Check, ChevronDown, CircleAlert, Copy, ExternalLink, FolderSearch, PlugZap, RefreshCw, Search, Download, Upload, Trash2, PencilLine, TerminalSquare, X } from 'lucide-react';
 import { Suspense, lazy, startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import type {
   ConnectInput,
   ConnectResult,
   ConnectionStatePayload,
+  ConnectionDiagnosticCode,
+  DownloadRemoteEntryInput,
+  FileConflictItem,
+  FileConflictStrategy,
+  FileOperationEvent,
   RemoteFileSystemState,
   RemoteDirectoryEntry,
   SavedConnectionSummary,
   SaveRemoteFileResult,
   SavedTunnelConfig,
   SearchRemoteFilesResult,
+  TailscaleHostSummary,
   TunnelEvent,
   TunnelRuntimeState,
   TunnelSnapshot,
+  UploadLocalEntriesInput,
 } from '../../shared/contracts';
 import { ConnectionForm } from './components/ConnectionForm';
 import { EntryDialog } from './components/EntryDialog';
@@ -73,6 +80,55 @@ interface TreeContextMenuState {
   x: number;
   y: number;
 }
+
+interface FileOperationItem {
+  operationId: string;
+  kind: FileOperationEvent['kind'];
+  status: FileOperationEvent['status'];
+  sourcePath: string;
+  targetPath: string;
+  message: string;
+  completedItems: number;
+  totalItems: number;
+  skippedItems: number;
+  currentPath?: string;
+  error?: string;
+  retryable?: boolean;
+}
+
+interface FileConflictDialogState {
+  kind: 'upload' | 'download';
+  operationId: string;
+  sourcePath: string;
+  targetPath: string;
+  localPaths?: string[];
+  conflicts: FileConflictItem[];
+}
+
+interface ReconnectTarget {
+  savedConnectionId: string;
+  workspacePath?: string;
+  previousConnectionId?: string | null;
+}
+
+interface TailscaleAuthDialogState {
+  url: string;
+  copied: boolean;
+}
+
+type RetryableFileRequest =
+  | {
+      kind: 'upload';
+      request: UploadLocalEntriesInput;
+    }
+  | {
+      kind: 'download';
+      request: DownloadRemoteEntryInput;
+    }
+  | {
+      kind: 'delete';
+      request: { path: string; operationId: string };
+    };
 
 function getErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message.trim().length > 0) {
@@ -206,6 +262,60 @@ function getFileSystemStatusText(filesystemState: RemoteFileSystemState | undefi
   }
 }
 
+function getConnectionDiagnosticLabel(code: ConnectionDiagnosticCode | undefined): string | null {
+  switch (code) {
+    case 'wrongPassword':
+      return 'Password incorrect';
+    case 'hostUnreachable':
+      return 'Host unreachable';
+    case 'knownHosts':
+      return 'Host key mismatch';
+    case 'privateKey':
+      return 'Private key issue';
+    case 'authenticationFailed':
+      return 'Authentication failed';
+    default:
+      return null;
+  }
+}
+
+function getFileOperationLabel(kind: FileOperationItem['kind']): string {
+  switch (kind) {
+    case 'upload':
+      return 'Upload';
+    case 'download':
+      return 'Download';
+    default:
+      return 'Delete';
+  }
+}
+
+function remapTabsToConnection(
+  tabs: EditorTabItem[],
+  previousConnectionId: string | null,
+  nextConnectionId: string,
+): EditorTabItem[] {
+  if (!previousConnectionId) {
+    return tabs;
+  }
+
+  return tabs.map((tab) =>
+    tab.connectionId === previousConnectionId
+      ? {
+          ...tab,
+          id: buildTabId(nextConnectionId, tab.path),
+          connectionId: nextConnectionId,
+        }
+      : tab,
+  );
+}
+
+function joinLocalPath(basePath: string, name: string): string {
+  const separator = basePath.includes('\\') ? '\\' : '/';
+  const normalizedBase = basePath.replace(/[\\/]+$/, '');
+  return `${normalizedBase}${separator}${name}`;
+}
+
 function useStableCallback<Args extends unknown[], Return>(
   callback: (...args: Args) => Return,
 ): (...args: Args) => Return {
@@ -231,6 +341,8 @@ export function App() {
   const [currentSavedConnectionId, setCurrentSavedConnectionId] = useState<string | null>(null);
   const [showConnectionScreen, setShowConnectionScreen] = useState(true);
   const [savedConnections, setSavedConnections] = useState<SavedConnectionSummary[]>([]);
+  const [tailscaleHosts, setTailscaleHosts] = useState<TailscaleHostSummary[]>([]);
+  const [isLoadingTailscaleHosts, setIsLoadingTailscaleHosts] = useState(true);
   const [isLoadingSavedConnections, setIsLoadingSavedConnections] = useState(true);
   const [activeSavedConnectionId, setActiveSavedConnectionId] = useState<string | null>(null);
   const [removingSavedConnectionId, setRemovingSavedConnectionId] = useState<string | null>(null);
@@ -267,14 +379,21 @@ export function App() {
   const [tunnelDialogLoading, setTunnelDialogLoading] = useState(false);
   const [tunnelSaveBusy, setTunnelSaveBusy] = useState(false);
   const [busyTunnelIds, setBusyTunnelIds] = useState<Set<string>>(new Set());
+  const [fileOperations, setFileOperations] = useState<FileOperationItem[]>([]);
+  const [conflictDialog, setConflictDialog] = useState<FileConflictDialogState | null>(null);
+  const [reconnectTarget, setReconnectTarget] = useState<ReconnectTarget | null>(null);
+  const [reconnectBusy, setReconnectBusy] = useState(false);
+  const [tailscaleAuthDialog, setTailscaleAuthDialog] = useState<TailscaleAuthDialogState | null>(null);
   const [editorRevealTarget, setEditorRevealTarget] = useState<{ tabId: string; line: number; column: number } | null>(null);
   const autoSaveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const directoryLoadPromisesRef = useRef(new Map<string, Promise<boolean>>());
   const idlePrefetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingWorkspacePathRef = useRef<string | null>(null);
+  const disconnectingManuallyRef = useRef(false);
   const fileMenuRef = useRef<HTMLDivElement | null>(null);
   const terminalPanelRef = useRef<TerminalPanelHandle | null>(null);
   const treeContextMenuRef = useRef<HTMLDivElement | null>(null);
+  const retryRequestsRef = useRef(new Map<string, RetryableFileRequest>());
 
   const activeTab = useMemo(
     () => tabs.find((tab) => tab.id === activeTabId) ?? null,
@@ -315,6 +434,7 @@ export function App() {
     () => tunnelSnapshots.filter((snapshot) => isTunnelRunning(snapshot.state)).length,
     [tunnelSnapshots],
   );
+  const latestFileOperation = useMemo(() => fileOperations[0] ?? null, [fileOperations]);
   const saveActiveTab = useStableCallback(() => {
     if (!activeTabId) {
       return;
@@ -328,30 +448,66 @@ export function App() {
       setConnectionStatus(payload);
       setStatusMessage(payload.message);
 
+      if (payload.authUrl) {
+        const authUrl = payload.authUrl;
+        setTailscaleAuthDialog((previous) =>
+          previous?.url === authUrl
+            ? previous
+            : {
+                url: authUrl,
+                copied: false,
+              },
+        );
+      } else {
+        setTailscaleAuthDialog(null);
+      }
+
       if (payload.state === 'connected') {
         setCurrentConnectionId(payload.connectionId ?? null);
         setShowConnectionScreen(false);
+        setReconnectBusy(false);
+        disconnectingManuallyRef.current = false;
       }
 
       if (payload.state === 'disconnected') {
         setCurrentConnectionId(null);
-        setCurrentSavedConnectionId(null);
-        setShowConnectionScreen(true);
-        setEntryDialog(null);
-        setFolderPickerInitialPath(null);
-        setSavedConnectionRenameDialog(null);
-        setSearchDialogOpen(false);
-        setQuickCommandsDialogOpen(false);
-        setTunnelsDialogOpen(false);
-        setTunnelSnapshots([]);
-        setBusyTunnelIds(new Set());
-        setTunnelDialogLoading(false);
-        setTunnelSaveBusy(false);
+        setReconnectBusy(false);
+        if (!disconnectingManuallyRef.current && currentSavedConnectionId) {
+          setReconnectTarget({
+            savedConnectionId: currentSavedConnectionId,
+            workspacePath,
+            previousConnectionId: payload.connectionId ?? currentConnectionId,
+          });
+          setShowConnectionScreen(false);
+        } else {
+          setCurrentSavedConnectionId(null);
+          setShowConnectionScreen(true);
+          setEntryDialog(null);
+          setFolderPickerInitialPath(null);
+          setSavedConnectionRenameDialog(null);
+          setSearchDialogOpen(false);
+          setQuickCommandsDialogOpen(false);
+          setTunnelsDialogOpen(false);
+          setTunnelSnapshots([]);
+          setBusyTunnelIds(new Set());
+          setTunnelDialogLoading(false);
+          setTunnelSaveBusy(false);
+          setReconnectTarget(null);
+        }
+        disconnectingManuallyRef.current = false;
+      }
+
+      if (payload.state === 'error' && currentSavedConnectionId) {
+        setReconnectTarget({
+          savedConnectionId: currentSavedConnectionId,
+          workspacePath,
+          previousConnectionId: payload.connectionId ?? currentConnectionId,
+        });
       }
     });
 
     return unsubscribe;
-  }, []);
+  }, [currentConnectionId, currentSavedConnectionId, workspacePath]);
 
   useEffect(() => {
     const unsubscribe = window.electronAPI.onTunnelEvent((event: TunnelEvent) => {
@@ -369,6 +525,18 @@ export function App() {
       if (event.state.message) {
         setStatusMessage(event.state.message);
       }
+    });
+
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    const unsubscribe = window.electronAPI.onFileOperationEvent((event: FileOperationEvent) => {
+      setFileOperations((previous) => {
+        const next = previous.filter((item) => item.operationId !== event.operationId);
+        return [event, ...next].slice(0, 6);
+      });
+      setStatusMessage(event.error ? event.error : event.message);
     });
 
     return unsubscribe;
@@ -397,6 +565,7 @@ export function App() {
 
   useEffect(() => {
     void loadSavedConnections(true);
+    void loadTailscaleHosts(true);
   }, []);
 
   useEffect(() => {
@@ -540,16 +709,31 @@ export function App() {
     }
   }, [tabs, autoSaveEnabled, currentConnectionId]);
 
-  async function connect(): Promise<void> {
+  async function connect(override?: ConnectInput): Promise<void> {
+    const nextForm = override ?? connectionForm;
+    const previousConnectionId = reconnectTarget?.previousConnectionId ?? currentConnectionId;
+    const previousActiveTab = activeTab;
     setBusyAction('connecting');
     setActiveSavedConnectionId(null);
-    setStatusMessage(`Connecting to ${connectionForm.host}:${connectionForm.port}...`);
+    setStatusMessage(`Connecting to ${nextForm.host}:${nextForm.port}...`);
 
     try {
-      const matchingSavedConnection = findMatchingSavedConnection(connectionForm);
-      const result = await window.electronAPI.connect(connectionForm);
-      setCurrentSavedConnectionId(result.savedConnectionId ?? null);
-      setConnectionForm((previous) => ({ ...previous, password: '' }));
+      const matchingSavedConnection = findMatchingSavedConnection(nextForm);
+      const result = await window.electronAPI.connect(nextForm);
+      const nextSavedConnectionId = result.savedConnectionId ?? matchingSavedConnection?.id ?? null;
+      setCurrentSavedConnectionId(nextSavedConnectionId);
+      setConnectionForm((previous) => ({ ...previous, password: '', passphrase: '' }));
+      setTabs((previous) => remapTabsToConnection(previous, previousConnectionId, result.connectionId));
+      if (previousConnectionId && previousActiveTab) {
+        setActiveTabId(buildTabId(result.connectionId, previousActiveTab.path));
+      }
+      if (nextSavedConnectionId) {
+        setReconnectTarget({
+          savedConnectionId: nextSavedConnectionId,
+          workspacePath: matchingSavedConnection?.workspacePaths[0] ?? matchingSavedConnection?.lastWorkspacePath,
+          previousConnectionId: result.connectionId,
+        });
+      }
       void initializeRemoteState(result, matchingSavedConnection?.workspacePaths[0] ?? matchingSavedConnection?.lastWorkspacePath);
       void loadSavedConnections(true);
     } catch (error) {
@@ -560,6 +744,8 @@ export function App() {
   }
 
   async function connectSaved(savedConnection: SavedConnectionSummary, preferredWorkspacePath?: string): Promise<void> {
+    const previousConnectionId = reconnectTarget?.previousConnectionId ?? currentConnectionId;
+    const previousActiveTab = activeTab;
     setBusyAction('connecting');
     setActiveSavedConnectionId(savedConnection.id);
     setStatusMessage(`Connecting to ${savedConnection.username}@${savedConnection.host}:${savedConnection.port}...`);
@@ -567,6 +753,15 @@ export function App() {
     try {
       const result = await window.electronAPI.connectSaved(savedConnection.id);
       setCurrentSavedConnectionId(result.savedConnectionId ?? savedConnection.id);
+      setReconnectTarget({
+        savedConnectionId: result.savedConnectionId ?? savedConnection.id,
+        workspacePath: preferredWorkspacePath ?? savedConnection.workspacePaths[0] ?? savedConnection.lastWorkspacePath,
+        previousConnectionId: result.connectionId,
+      });
+      setTabs((previous) => remapTabsToConnection(previous, previousConnectionId, result.connectionId));
+      if (previousConnectionId && previousActiveTab) {
+        setActiveTabId(buildTabId(result.connectionId, previousActiveTab.path));
+      }
       void initializeRemoteState(
         result,
         preferredWorkspacePath ?? savedConnection.workspacePaths[0] ?? savedConnection.lastWorkspacePath,
@@ -581,6 +776,7 @@ export function App() {
   }
 
   async function disconnect(): Promise<void> {
+    disconnectingManuallyRef.current = true;
     setBusyAction('disconnecting');
     clearAllAutoSaveTimers();
     setFileMenuOpen(false);
@@ -594,6 +790,7 @@ export function App() {
       setEntriesByDirectory({});
       setExpandedDirectories(new Set());
     } catch (error) {
+      disconnectingManuallyRef.current = false;
       setStatusMessage(getErrorMessage(error, 'Unable to disconnect'));
     } finally {
       setBusyAction(null);
@@ -647,6 +844,21 @@ export function App() {
       }
     } finally {
       setIsLoadingSavedConnections(false);
+    }
+  }
+
+  async function loadTailscaleHosts(silent = false): Promise<void> {
+    setIsLoadingTailscaleHosts(true);
+
+    try {
+      const nextHosts = await window.electronAPI.listTailscaleHosts();
+      setTailscaleHosts(nextHosts);
+    } catch (error) {
+      if (!silent) {
+        setStatusMessage(getErrorMessage(error, 'Unable to load Tailscale hosts'));
+      }
+    } finally {
+      setIsLoadingTailscaleHosts(false);
     }
   }
 
@@ -790,6 +1002,27 @@ export function App() {
         (entry) => entry.host === host && entry.port === input.port && entry.username === username,
       ) ?? null
     );
+  }
+
+  function buildTailscaleForm(host: TailscaleHostSummary): ConnectInput {
+    return {
+      ...connectionForm,
+      host: host.host,
+      port: 22,
+      username: host.sshUser?.trim() || connectionForm.username.trim() || 'root',
+      authMethod: 'tailscale',
+      hostVerification: 'off',
+      password: '',
+      privateKeyPath: '',
+      passphrase: '',
+      agentSocket: '',
+    };
+  }
+
+  function applyTailscaleHost(host: TailscaleHostSummary): ConnectInput {
+    const nextForm = buildTailscaleForm(host);
+    setConnectionForm(nextForm);
+    return nextForm;
   }
 
   async function toggleDirectory(remotePath: string): Promise<void> {
@@ -1050,7 +1283,12 @@ export function App() {
   }
 
   async function deleteEntry(entry: RemoteDirectoryEntry): Promise<void> {
-    await window.electronAPI.deleteEntry({ path: entry.path });
+    const operationId = crypto.randomUUID();
+    retryRequestsRef.current.set(operationId, {
+      kind: 'delete',
+      request: { path: entry.path, operationId },
+    });
+    await window.electronAPI.deleteEntry({ path: entry.path, operationId });
     const parentPath = entry.kind === 'directory' ? getParentPath(entry.path) : getParentPath(entry.path);
     if (entry.path === workspacePath) {
       await refreshDirectory(rootPath, true);
@@ -1072,14 +1310,78 @@ export function App() {
   }
 
   async function uploadToDirectory(remotePath: string): Promise<void> {
-    await window.electronAPI.uploadLocalEntries(remotePath);
+    const localPaths = await window.electronAPI.pickUploadEntries();
+    if (localPaths.length === 0) {
+      return;
+    }
+
+    const operationId = crypto.randomUUID();
+    const request: UploadLocalEntriesInput = {
+      operationId,
+      remotePath,
+      localPaths,
+      conflictStrategy: 'ask',
+    };
+    retryRequestsRef.current.set(operationId, {
+      kind: 'upload',
+      request,
+    });
+    const result = await window.electronAPI.uploadLocalEntries(request);
+    if (result.status === 'conflict') {
+      setConflictDialog({
+        kind: 'upload',
+        operationId,
+        sourcePath: localPaths[0] ?? remotePath,
+        targetPath: remotePath,
+        localPaths,
+        conflicts: result.conflicts,
+      });
+      return;
+    }
+
     await refreshDirectory(remotePath, true);
-    setStatusMessage(`Uploaded into ${remotePath}`);
+    setStatusMessage(
+      result.skippedItems > 0
+        ? `Uploaded into ${remotePath} (${result.skippedItems} skipped)`
+        : `Uploaded into ${remotePath}`,
+    );
   }
 
   async function downloadEntry(entry: RemoteDirectoryEntry): Promise<void> {
-    await window.electronAPI.downloadEntry(entry.path);
-    setStatusMessage(`Downloaded ${entry.path}`);
+    const downloadDirectory = await window.electronAPI.pickDownloadDirectory();
+    if (!downloadDirectory) {
+      return;
+    }
+
+    const operationId = crypto.randomUUID();
+    const localPath = joinLocalPath(downloadDirectory, entry.name);
+    const request: DownloadRemoteEntryInput = {
+      operationId,
+      remotePath: entry.path,
+      localPath,
+      conflictStrategy: 'ask',
+    };
+    retryRequestsRef.current.set(operationId, {
+      kind: 'download',
+      request,
+    });
+    const result = await window.electronAPI.downloadEntry(request);
+    if (result.status === 'conflict') {
+      setConflictDialog({
+        kind: 'download',
+        operationId,
+        sourcePath: entry.path,
+        targetPath: localPath,
+        conflicts: result.conflicts,
+      });
+      return;
+    }
+
+    setStatusMessage(
+      result.skippedItems > 0
+        ? `Downloaded ${entry.path} (${result.skippedItems} skipped)`
+        : `Downloaded ${entry.path}`,
+    );
   }
 
   async function runSearch(): Promise<void> {
@@ -1362,6 +1664,114 @@ export function App() {
     }
   }
 
+  function closeConflictDialog(): void {
+    setConflictDialog(null);
+  }
+
+  async function resolveConflictDialog(strategy: Exclude<FileConflictStrategy, 'ask'>): Promise<void> {
+    if (!conflictDialog) {
+      return;
+    }
+
+    const dialog = conflictDialog;
+    setConflictDialog(null);
+
+    if (dialog.kind === 'upload') {
+      const request: UploadLocalEntriesInput = {
+        operationId: dialog.operationId,
+        remotePath: dialog.targetPath,
+        localPaths: dialog.localPaths ?? [],
+        conflictStrategy: strategy,
+      };
+      retryRequestsRef.current.set(dialog.operationId, { kind: 'upload', request });
+      const result = await window.electronAPI.uploadLocalEntries(request);
+      if (result.status === 'completed') {
+        await refreshDirectory(dialog.targetPath, true);
+      }
+      return;
+    }
+
+    const request: DownloadRemoteEntryInput = {
+      operationId: dialog.operationId,
+      remotePath: dialog.sourcePath,
+      localPath: dialog.targetPath,
+      conflictStrategy: strategy,
+    };
+    retryRequestsRef.current.set(dialog.operationId, { kind: 'download', request });
+    const result = await window.electronAPI.downloadEntry(request);
+    if (result.status === 'conflict') {
+      setConflictDialog(dialog);
+    }
+  }
+
+  async function retryFileOperation(operation: FileOperationItem): Promise<void> {
+    try {
+      const retryRequest = retryRequestsRef.current.get(operation.operationId);
+      if (!retryRequest) {
+        setStatusMessage('Retry context expired. Start the operation again.');
+        return;
+      }
+
+      if (retryRequest.kind === 'delete') {
+        await window.electronAPI.deleteEntry(retryRequest.request);
+        return;
+      }
+
+      if (retryRequest.kind === 'upload') {
+        await window.electronAPI.uploadLocalEntries({
+          ...retryRequest.request,
+          conflictStrategy: 'overwrite',
+        });
+        await refreshDirectory(retryRequest.request.remotePath, true);
+        return;
+      }
+
+      await window.electronAPI.downloadEntry({
+        ...retryRequest.request,
+        conflictStrategy: 'overwrite',
+      });
+    } catch (error) {
+      setStatusMessage(getErrorMessage(error, `Unable to retry ${operation.kind}`));
+    }
+  }
+
+  async function reconnect(): Promise<void> {
+    if (!reconnectTarget) {
+      return;
+    }
+
+    const savedConnection = savedConnections.find((entry) => entry.id === reconnectTarget.savedConnectionId);
+    if (!savedConnection) {
+      setStatusMessage('Saved connection no longer exists');
+      return;
+    }
+
+    setReconnectBusy(true);
+    try {
+      await connectSaved(savedConnection, reconnectTarget.workspacePath);
+    } finally {
+      setReconnectBusy(false);
+    }
+  }
+
+  function closeTailscaleAuthDialog(): void {
+    setTailscaleAuthDialog(null);
+  }
+
+  async function copyTailscaleAuthUrl(): Promise<void> {
+    if (!tailscaleAuthDialog) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(tailscaleAuthDialog.url);
+      setTailscaleAuthDialog((previous) => (previous ? { ...previous, copied: true } : previous));
+      setStatusMessage('Copied Tailscale login link');
+    } catch (error) {
+      setStatusMessage(getErrorMessage(error, 'Unable to copy login link'));
+    }
+  }
+
   function applySavedState(tabId: string, savedContent: string, _result: SaveRemoteFileResult): void {
     setTabs((previous) =>
       previous.map((item) =>
@@ -1378,6 +1788,7 @@ export function App() {
 
   const isConnected = connectionStatus.state === 'connected';
   const fileSystemReady = connectionStatus.filesystemState === 'ready';
+  const connectionDiagnosticLabel = getConnectionDiagnosticLabel(connectionStatus.diagnosticCode);
 
   useEffect(() => {
     if (!fileSystemReady) {
@@ -1643,7 +2054,22 @@ export function App() {
 
         <div className="status-cluster">
           <span className={`state-badge state-${connectionStatus.state}`}>{connectionStatus.state}</span>
+          {connectionDiagnosticLabel ? <span className="status-diagnostic">{connectionDiagnosticLabel}</span> : null}
           <span className="status-text">{statusMessage}</span>
+          {reconnectTarget && !isConnected ? (
+            <button
+              type="button"
+              className="status-action-button"
+              onClick={() => {
+                void reconnect();
+              }}
+              disabled={reconnectBusy || busyAction !== null}
+              title={connectionStatus.recoveryHint ?? 'Reconnect using the last saved connection'}
+            >
+              {reconnectBusy ? <RefreshCw className="spin" size={14} /> : <RefreshCw size={14} />}
+              <span>Reconnect</span>
+            </button>
+          ) : null}
         </div>
       </header>
 
@@ -1656,12 +2082,21 @@ export function App() {
               mode="launch"
               isBusy={busyAction !== null}
               savedConnections={savedConnections}
+              tailscaleHosts={tailscaleHosts}
+              isLoadingTailscaleHosts={isLoadingTailscaleHosts}
               isLoadingSavedConnections={isLoadingSavedConnections}
               activeSavedConnectionId={activeSavedConnectionId}
               removingSavedConnectionId={removingSavedConnectionId}
               onChange={setConnectionForm}
               onConnect={() => {
                 void connect();
+              }}
+              onConnectTailscaleHost={(host) => {
+                const nextForm = applyTailscaleHost(host);
+                void connect(nextForm);
+              }}
+              onRefreshTailscaleHosts={() => {
+                void loadTailscaleHosts();
               }}
               onConnectSaved={(savedConnectionId) => {
                 const savedConnection = savedConnections.find((entry) => entry.id === savedConnectionId);
@@ -1689,10 +2124,65 @@ export function App() {
                 void disconnect();
               }}
             />
+            {connectionStatus.authUrl ? (
+              <div className="launch-auth-banner">
+                <div className="connection-banner-copy">
+                  <strong>Browser login required</strong>
+                  <span>{connectionStatus.recoveryHint ?? statusMessage}</span>
+                </div>
+                <button
+                  type="button"
+                  className="secondary-button connection-banner-action"
+                  onClick={() => {
+                    void window.electronAPI.openExternal(connectionStatus.authUrl!);
+                  }}
+                  disabled={busyAction !== null}
+                >
+                  <ExternalLink size={16} />
+                  <span>Open Login Link</span>
+                </button>
+              </div>
+            ) : null}
           </div>
         </main>
       ) : (
       <PanelGroup direction="vertical" className="app-panels">
+        {connectionStatus.state !== 'connected' ? (
+          <section className="connection-banner">
+            <div className="connection-banner-copy">
+              <strong>{connectionDiagnosticLabel ?? connectionStatus.state}</strong>
+              <span>{connectionStatus.recoveryHint ?? statusMessage}</span>
+            </div>
+            <div className="connection-banner-actions">
+              {connectionStatus.authUrl ? (
+                <button
+                  type="button"
+                  className="secondary-button connection-banner-action"
+                  onClick={() => {
+                    void window.electronAPI.openExternal(connectionStatus.authUrl!);
+                  }}
+                  disabled={busyAction !== null}
+                >
+                  <ExternalLink size={16} />
+                  <span>Open Login Link</span>
+                </button>
+              ) : null}
+              {reconnectTarget ? (
+                <button
+                  type="button"
+                  className="primary-button connection-banner-action"
+                  onClick={() => {
+                    void reconnect();
+                  }}
+                  disabled={reconnectBusy || busyAction !== null}
+                >
+                  {reconnectBusy ? <RefreshCw className="spin" size={16} /> : <RefreshCw size={16} />}
+                  <span>Reconnect</span>
+                </button>
+              ) : null}
+            </div>
+          </section>
+        ) : null}
         <Panel defaultSize={72} minSize={46}>
           <PanelGroup direction="horizontal">
             <Panel defaultSize={18} minSize={14} maxSize={24}>
@@ -1797,6 +2287,25 @@ export function App() {
           <CircleAlert size={14} />
           <span>{statusMessage}</span>
         </div>
+        {latestFileOperation ? (
+          <div className={`statusbar-section statusbar-file-op statusbar-file-op-${latestFileOperation.status}`}>
+            <span>
+              {getFileOperationLabel(latestFileOperation.kind)} {latestFileOperation.completedItems}/{latestFileOperation.totalItems}
+            </span>
+            <span>{latestFileOperation.error ?? latestFileOperation.message}</span>
+            {latestFileOperation.retryable ? (
+              <button
+                type="button"
+                className="status-inline-button"
+                onClick={() => {
+                  void retryFileOperation(latestFileOperation);
+                }}
+              >
+                Retry
+              </button>
+            ) : null}
+          </div>
+        ) : null}
         <div className="statusbar-section">
           <span>{getFileSystemStatusText(connectionStatus.filesystemState)}</span>
         </div>
@@ -1940,6 +2449,16 @@ export function App() {
                 type="button"
                 className="tree-context-menu-item"
                 onClick={() => {
+                  handleTreeContextMenuAction('download', treeContextMenu.path);
+                }}
+              >
+                <Download size={14} />
+                <span>Download</span>
+              </button>
+              <button
+                type="button"
+                className="tree-context-menu-item"
+                onClick={() => {
                   handleTreeContextMenuAction('create-file', treeContextMenu.path);
                 }}
               >
@@ -1990,6 +2509,120 @@ export function App() {
             <Trash2 size={14} />
             <span>Delete</span>
           </button>
+        </div>
+      ) : null}
+
+      {conflictDialog ? (
+        <div
+          className="dialog-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeConflictDialog();
+            }
+          }}
+        >
+          <div className="dialog-card" role="dialog" aria-modal="true" aria-labelledby="conflict-dialog-title">
+            <div className="dialog-header">
+              <div>
+                <h2 id="conflict-dialog-title">Conflicting Files</h2>
+                <p>{conflictDialog.conflicts.length} existing item(s) found. Choose how to proceed.</p>
+              </div>
+            </div>
+            <div className="conflict-list">
+              {conflictDialog.conflicts.slice(0, 8).map((conflict) => (
+                <div key={conflict.path} className="conflict-list-item">
+                  <strong>{conflict.kind}</strong>
+                  <span>{conflict.path}</span>
+                </div>
+              ))}
+              {conflictDialog.conflicts.length > 8 ? (
+                <div className="conflict-list-item">
+                  <span>+{conflictDialog.conflicts.length - 8} more</span>
+                </div>
+              ) : null}
+            </div>
+            <div className="dialog-actions">
+              <button type="button" className="secondary-button" onClick={closeConflictDialog}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => {
+                  void resolveConflictDialog('skip');
+                }}
+              >
+                Skip Existing
+              </button>
+              <button
+                type="button"
+                className="primary-button"
+                onClick={() => {
+                  void resolveConflictDialog('overwrite');
+                }}
+              >
+                Overwrite
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {tailscaleAuthDialog ? (
+        <div
+          className="dialog-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeTailscaleAuthDialog();
+            }
+          }}
+        >
+          <section className="dialog-card tailscale-auth-dialog">
+            <div className="dialog-header">
+              <div>
+                <h2>Tailscale Login Required</h2>
+                <p>Open or copy the link below to finish Tailscale SSH verification, then come back here.</p>
+              </div>
+              <button
+                type="button"
+                className="icon-button dialog-close-button"
+                onClick={closeTailscaleAuthDialog}
+                aria-label="Close login dialog"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="dialog-form">
+              <label className="dialog-field">
+                <span>Login Link</span>
+                <input value={tailscaleAuthDialog.url} readOnly />
+              </label>
+            </div>
+
+            <div className="dialog-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => {
+                  void copyTailscaleAuthUrl();
+                }}
+              >
+                {tailscaleAuthDialog.copied ? <Check size={16} /> : <Copy size={16} />}
+                <span>{tailscaleAuthDialog.copied ? 'Copied' : 'Copy Link'}</span>
+              </button>
+              <button
+                type="button"
+                className="primary-button"
+                onClick={() => {
+                  void window.electronAPI.openExternal(tailscaleAuthDialog.url);
+                }}
+              >
+                <ExternalLink size={16} />
+                <span>Open in Browser</span>
+              </button>
+            </div>
+          </section>
         </div>
       ) : null}
     </div>

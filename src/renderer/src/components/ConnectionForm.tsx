@@ -1,6 +1,7 @@
 import {
   ChevronDown,
   ChevronRight,
+  Globe,
   KeyRound,
   History,
   LoaderCircle,
@@ -10,6 +11,7 @@ import {
   Power,
   RefreshCw,
   ScanSearch,
+  ShieldCheck,
   Trash2,
 } from 'lucide-react';
 import { type ChangeEvent, useState } from 'react';
@@ -18,6 +20,7 @@ import type {
   ConnectInput,
   ConnectionStatePayload,
   SavedConnectionSummary,
+  TailscaleHostSummary,
 } from '../../../shared/contracts';
 
 interface ConnectionFormProps {
@@ -26,11 +29,15 @@ interface ConnectionFormProps {
   isBusy: boolean;
   mode?: 'launch' | 'compact';
   savedConnections?: SavedConnectionSummary[];
+  tailscaleHosts?: TailscaleHostSummary[];
+  isLoadingTailscaleHosts?: boolean;
   isLoadingSavedConnections?: boolean;
   activeSavedConnectionId?: string | null;
   removingSavedConnectionId?: string | null;
   onChange: (next: ConnectInput) => void;
   onConnect: () => void;
+  onConnectTailscaleHost?: (host: TailscaleHostSummary) => void;
+  onRefreshTailscaleHosts?: () => void;
   onConnectSaved?: (savedConnectionId: string) => void;
   onConnectSavedWorkspace?: (savedConnectionId: string, workspacePath: string) => void;
   onRemoveSaved?: (savedConnectionId: string) => void;
@@ -56,11 +63,15 @@ export function ConnectionForm({
   isBusy,
   mode = 'compact',
   savedConnections = [],
+  tailscaleHosts = [],
+  isLoadingTailscaleHosts = false,
   isLoadingSavedConnections = false,
   activeSavedConnectionId = null,
   removingSavedConnectionId = null,
   onChange,
   onConnect,
+  onConnectTailscaleHost,
+  onRefreshTailscaleHosts,
   onConnectSaved,
   onConnectSavedWorkspace,
   onRemoveSaved,
@@ -111,23 +122,6 @@ export function ConnectionForm({
         </div>
       ) : null}
 
-      <label>
-        <span>Host</span>
-        <input value={value.host} onChange={handleField('host')} placeholder="10.0.0.23" />
-      </label>
-
-      <div className="field-row">
-        <label>
-          <span>Port</span>
-          <input value={String(value.port)} onChange={handleField('port')} inputMode="numeric" />
-        </label>
-
-        <label>
-          <span>User</span>
-          <input value={value.username} onChange={handleField('username')} placeholder="root" />
-        </label>
-      </div>
-
       <div className="auth-choice-row">
         <button
           type="button"
@@ -159,7 +153,49 @@ export function ConnectionForm({
           <ScanSearch size={14} />
           <span>Agent</span>
         </button>
+        <button
+          type="button"
+          className={`auth-choice-button ${authMethod === 'tailscale' ? 'auth-choice-button-active' : ''}`}
+          onClick={() => {
+            onChange({
+              ...value,
+              authMethod: 'tailscale',
+              hostVerification: 'off',
+            });
+          }}
+        >
+          <ShieldCheck size={14} />
+          <span>Tailscale</span>
+        </button>
       </div>
+
+      {authMethod !== 'tailscale' ? (
+        <>
+          <label>
+            <span>Host</span>
+            <input value={value.host} onChange={handleField('host')} placeholder="10.0.0.23" />
+          </label>
+
+          <div className="field-row">
+            <label>
+              <span>Port</span>
+              <input value={String(value.port)} onChange={handleField('port')} inputMode="numeric" />
+            </label>
+
+            <label>
+              <span>User</span>
+              <input value={value.username} onChange={handleField('username')} placeholder="root" />
+            </label>
+          </div>
+        </>
+      ) : (
+        <div className="tailscale-mode-panel">
+          <div className="tailscale-inline-hint">
+            <ShieldCheck size={14} />
+            <span>Pick a host below. The app will use your local Tailscale SSH user and connect immediately.</span>
+          </div>
+        </div>
+      )}
 
       {authMethod === 'password' ? (
         <label>
@@ -206,29 +242,33 @@ export function ConnectionForm({
         </label>
       ) : null}
 
-      <label className="toggle-row connection-toggle-row">
-        <input
-          type="checkbox"
-          checked={hostVerification === 'knownHosts'}
-          onChange={(event) => {
-            onChange({
-              ...value,
-              hostVerification: event.target.checked ? 'knownHosts' : 'off',
-            });
-          }}
-        />
-        <span>Verify host with known_hosts</span>
-      </label>
+      {authMethod !== 'tailscale' ? (
+        <>
+          <label className="toggle-row connection-toggle-row">
+            <input
+              type="checkbox"
+              checked={hostVerification === 'knownHosts'}
+              onChange={(event) => {
+                onChange({
+                  ...value,
+                  hostVerification: event.target.checked ? 'knownHosts' : 'off',
+                });
+              }}
+            />
+            <span>Verify host with known_hosts</span>
+          </label>
 
-      {hostVerification === 'knownHosts' ? (
-        <label>
-          <span>known_hosts Path</span>
-          <input
-            value={value.knownHostsPath ?? ''}
-            onChange={handleField('knownHostsPath')}
-            placeholder="Path to known_hosts file"
-          />
-        </label>
+          {hostVerification === 'knownHosts' ? (
+            <label>
+              <span>known_hosts Path</span>
+              <input
+                value={value.knownHostsPath ?? ''}
+                onChange={handleField('knownHostsPath')}
+                placeholder="Path to known_hosts file"
+              />
+            </label>
+          ) : null}
+        </>
       ) : null}
 
       <div className="connection-actions">
@@ -238,12 +278,14 @@ export function ConnectionForm({
           onClick={onConnect}
           disabled={
             isBusy ||
-            value.host.trim() === '' ||
-            value.username.trim() === '' ||
+            (authMethod !== 'tailscale' && value.host.trim() === '') ||
+            (authMethod !== 'tailscale' && value.username.trim() === '') ||
             (authMethod === 'password' && value.password === '') ||
             (authMethod === 'privateKey' && (value.privateKeyPath ?? '').trim() === '') ||
             (authMethod === 'agent' && (value.agentSocket ?? '').trim() === '') ||
-            (hostVerification === 'knownHosts' && (value.knownHostsPath ?? '').trim() === '')
+            (authMethod !== 'tailscale' &&
+              hostVerification === 'knownHosts' &&
+              (value.knownHostsPath ?? '').trim() === '')
           }
         >
           {isBusy ? <LoaderCircle className="spin" size={16} /> : <ActionIcon size={16} />}
@@ -259,124 +301,188 @@ export function ConnectionForm({
       </div>
 
       {mode === 'launch' ? (
-        <section className="saved-connections">
-          <div className="section-heading">
-            <span>Recent Clients</span>
-            <History size={14} />
-          </div>
+        <>
+          {authMethod === 'tailscale' ? (
+            <section className="saved-connections">
+              <div className="section-heading">
+                <span>Tailscale Hosts</span>
+                <button
+                  type="button"
+                  className="icon-button saved-connection-action"
+                  onClick={() => {
+                    onRefreshTailscaleHosts?.();
+                  }}
+                  disabled={isBusy || isLoadingTailscaleHosts}
+                  aria-label="Refresh Tailscale hosts"
+                >
+                  {isLoadingTailscaleHosts ? <LoaderCircle className="spin" size={16} /> : <Globe size={16} />}
+                </button>
+              </div>
 
-          {isLoadingSavedConnections ? (
-            <div className="saved-connections-empty">
-              <LoaderCircle className="spin" size={16} />
-              <span>Loading recent clients...</span>
-            </div>
-          ) : savedConnections.length > 0 ? (
-            <div className="saved-connections-list">
-              {savedConnections.map((savedConnection) => {
-                const isConnectingSaved = activeSavedConnectionId === savedConnection.id;
-                const isRemovingSaved = removingSavedConnectionId === savedConnection.id;
-                const workspacesExpanded = expandedSavedConnectionIds.has(savedConnection.id);
-                const primaryLabel = savedConnection.displayName;
-                const secondaryLabel =
-                  savedConnection.displayName === `${savedConnection.username}@${savedConnection.host}`
-                    ? `${savedConnection.host}:${savedConnection.port}`
-                    : `${savedConnection.username}@${savedConnection.host}:${savedConnection.port}`;
-
-                return (
-                  <div key={savedConnection.id} className="saved-connection-card">
-                    <div className="saved-connection-main">
-                      <button
-                        type="button"
-                        className="saved-connection-button"
-                        disabled={isBusy || isRemovingSaved}
-                        onClick={() => {
-                          onConnectSaved?.(savedConnection.id);
-                        }}
-                      >
-                        <div className="saved-connection-copy">
-                          <strong>{primaryLabel}</strong>
-                          <span>{secondaryLabel}</span>
-                          <span>Last connected {formatLastConnectedAt(savedConnection.lastConnectedAt)}</span>
-                        </div>
-                        <span className="saved-connection-button-label">
-                          {isConnectingSaved ? <LoaderCircle className="spin" size={16} /> : <LogIn size={16} />}
-                          <span>{isConnectingSaved ? 'Connecting' : 'Connect'}</span>
-                        </span>
-                      </button>
-
-                      {savedConnection.workspacePaths.length > 0 ? (
-                        <div className="saved-workspace-panel">
-                          <button
-                            type="button"
-                            className="saved-workspace-toggle"
-                            disabled={isBusy || isRemovingSaved}
-                            onClick={() => {
-                              toggleSavedConnectionWorkspaces(savedConnection.id);
-                            }}
-                          >
-                            {workspacesExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                            <span>Workspaces</span>
-                            <strong>{savedConnection.workspacePaths.length}</strong>
-                          </button>
-
-                          {workspacesExpanded ? (
-                            <div className="saved-workspace-list">
-                              {savedConnection.workspacePaths.map((workspacePath, index) => (
-                                <button
-                                  key={workspacePath}
-                                  type="button"
-                                  className="saved-workspace-chip"
-                                  disabled={isBusy || isRemovingSaved}
-                                  onClick={() => {
-                                    onConnectSavedWorkspace?.(savedConnection.id, workspacePath);
-                                  }}
-                                  title={workspacePath}
-                                >
-                                  <span>{index === 0 ? 'Recent' : 'Workspace'}</span>
-                                  <strong>{workspacePath}</strong>
-                                </button>
-                              ))}
-                            </div>
-                          ) : null}
-                        </div>
-                      ) : null}
+              {isLoadingTailscaleHosts ? (
+                <div className="saved-connections-empty">
+                  <LoaderCircle className="spin" size={16} />
+                  <span>Loading Tailscale hosts...</span>
+                </div>
+              ) : tailscaleHosts.length > 0 ? (
+                <div className="saved-connections-list">
+                  {tailscaleHosts.map((host) => (
+                    <div key={host.id} className="saved-connection-card">
+                      <div className="saved-connection-main">
+                        <button
+                          type="button"
+                          className="saved-connection-button"
+                          disabled={isBusy || !host.online}
+                          onClick={() => {
+                            onConnectTailscaleHost?.(host);
+                          }}
+                        >
+                          <div className="saved-connection-copy">
+                            <strong>{host.displayName}</strong>
+                            <span>{host.host}</span>
+                            <span>
+                              {host.online ? 'Online' : 'Offline'}
+                              {host.active ? ' • Active' : ''}
+                              {host.os ? ` • ${host.os}` : ''}
+                              {host.sshUser ? ` • ${host.sshUser}` : ''}
+                            </span>
+                          </div>
+                          <span className="saved-connection-button-label">
+                            <ShieldCheck size={16} />
+                            <span>{host.online ? 'Connect' : 'Offline'}</span>
+                          </span>
+                        </button>
+                      </div>
                     </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="saved-connections-empty">
+                  <span>No Tailscale hosts found. Make sure `tailscaled` is running and you are logged in.</span>
+                </div>
+              )}
+            </section>
+          ) : null}
 
-                    <div className="saved-connection-actions">
-                      <button
-                        type="button"
-                        className="icon-button saved-connection-action"
-                        disabled={isBusy || isRemovingSaved}
-                        aria-label={`Rename ${savedConnection.displayName}`}
-                        onClick={() => {
-                          onRenameSaved?.(savedConnection.id);
-                        }}
-                      >
-                        <PencilLine size={16} />
-                      </button>
+          <section className="saved-connections">
+            <div className="section-heading">
+              <span>Recent Clients</span>
+              <History size={14} />
+            </div>
 
-                      <button
-                        type="button"
-                        className="icon-button saved-connection-action saved-connection-remove"
-                        disabled={isBusy || isRemovingSaved}
-                        aria-label={`Remove ${savedConnection.displayName}`}
-                        onClick={() => {
-                          onRemoveSaved?.(savedConnection.id);
-                        }}
-                      >
-                        {isRemovingSaved ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />}
-                      </button>
+            {isLoadingSavedConnections ? (
+              <div className="saved-connections-empty">
+                <LoaderCircle className="spin" size={16} />
+                <span>Loading recent clients...</span>
+              </div>
+            ) : savedConnections.length > 0 ? (
+              <div className="saved-connections-list">
+                {savedConnections.map((savedConnection) => {
+                  const isConnectingSaved = activeSavedConnectionId === savedConnection.id;
+                  const isRemovingSaved = removingSavedConnectionId === savedConnection.id;
+                  const workspacesExpanded = expandedSavedConnectionIds.has(savedConnection.id);
+                  const primaryLabel = savedConnection.displayName;
+                  const secondaryLabel =
+                    savedConnection.displayName === `${savedConnection.username}@${savedConnection.host}`
+                      ? `${savedConnection.host}:${savedConnection.port}`
+                      : `${savedConnection.username}@${savedConnection.host}:${savedConnection.port}`;
+
+                  return (
+                    <div key={savedConnection.id} className="saved-connection-card">
+                      <div className="saved-connection-main">
+                        <button
+                          type="button"
+                          className="saved-connection-button"
+                          disabled={isBusy || isRemovingSaved}
+                          onClick={() => {
+                            onConnectSaved?.(savedConnection.id);
+                          }}
+                        >
+                          <div className="saved-connection-copy">
+                            <strong>{primaryLabel}</strong>
+                            <span>{secondaryLabel}</span>
+                            <span>Last connected {formatLastConnectedAt(savedConnection.lastConnectedAt)}</span>
+                          </div>
+                          <span className="saved-connection-button-label">
+                            {isConnectingSaved ? <LoaderCircle className="spin" size={16} /> : <LogIn size={16} />}
+                            <span>{isConnectingSaved ? 'Connecting' : 'Connect'}</span>
+                          </span>
+                        </button>
+
+                        {savedConnection.workspacePaths.length > 0 ? (
+                          <div className="saved-workspace-panel">
+                            <button
+                              type="button"
+                              className="saved-workspace-toggle"
+                              disabled={isBusy || isRemovingSaved}
+                              onClick={() => {
+                                toggleSavedConnectionWorkspaces(savedConnection.id);
+                              }}
+                            >
+                              {workspacesExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                              <span>Workspaces</span>
+                              <strong>{savedConnection.workspacePaths.length}</strong>
+                            </button>
+
+                            {workspacesExpanded ? (
+                              <div className="saved-workspace-list">
+                                {savedConnection.workspacePaths.map((workspacePath, index) => (
+                                  <button
+                                    key={workspacePath}
+                                    type="button"
+                                    className="saved-workspace-chip"
+                                    disabled={isBusy || isRemovingSaved}
+                                    onClick={() => {
+                                      onConnectSavedWorkspace?.(savedConnection.id, workspacePath);
+                                    }}
+                                    title={workspacePath}
+                                  >
+                                    <span>{index === 0 ? 'Recent' : 'Workspace'}</span>
+                                    <strong>{workspacePath}</strong>
+                                  </button>
+                                ))}
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </div>
+
+                      <div className="saved-connection-actions">
+                        <button
+                          type="button"
+                          className="icon-button saved-connection-action"
+                          disabled={isBusy || isRemovingSaved}
+                          aria-label={`Rename ${savedConnection.displayName}`}
+                          onClick={() => {
+                            onRenameSaved?.(savedConnection.id);
+                          }}
+                        >
+                          <PencilLine size={16} />
+                        </button>
+
+                        <button
+                          type="button"
+                          className="icon-button saved-connection-action saved-connection-remove"
+                          disabled={isBusy || isRemovingSaved}
+                          aria-label={`Remove ${savedConnection.displayName}`}
+                          onClick={() => {
+                            onRemoveSaved?.(savedConnection.id);
+                          }}
+                        >
+                          {isRemovingSaved ? <LoaderCircle className="spin" size={16} /> : <Trash2 size={16} />}
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <div className="saved-connections-empty">
-              <span>Your successful SSH connections will show up here for one-click access.</span>
-            </div>
-          )}
-        </section>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="saved-connections-empty">
+                <span>Your successful SSH connections will show up here for one-click access.</span>
+              </div>
+            )}
+          </section>
+        </>
       ) : null}
     </section>
   );

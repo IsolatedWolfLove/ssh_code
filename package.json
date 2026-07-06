@@ -1,6 +1,6 @@
 {
   "name": "ssh-studio",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "private": true,
   "description": "Desktop SSH client with SFTP file tree, Monaco editor, and integrated terminal.",
   "author": {
@@ -73,8 +73,9 @@
     },
     "nsis": {
       "oneClick": false,
+      "perMachine": true,
       "allowToChangeInstallationDirectory": true,
-      "license": "license.txt",
+      "license": "license.rtf",
       "uninstallDisplayName": "SSH Studio"
     }
   }

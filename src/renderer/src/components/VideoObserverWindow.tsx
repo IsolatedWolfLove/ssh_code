@@ -12,6 +12,8 @@ export function VideoObserverWindow({ streamId }: VideoObserverWindowProps) {
   const [message, setMessage] = useState<string>('等待第一帧画面…');
   const [frameCount, setFrameCount] = useState(0);
   const frameUrlRef = useRef<string | null>(null);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const lastContentSizeRef = useRef<string>('');
 
   useEffect(() => {
     const unsubscribeFrame = window.electronAPI.onVideoFrame((event: VideoFrameEvent) => {
@@ -63,6 +65,22 @@ export function VideoObserverWindow({ streamId }: VideoObserverWindowProps) {
   // StrictMode's dev-mode mount/unmount/remount cycle, which would tear down
   // the stream (and close this window) immediately after opening it.
 
+  function fitWindowToFrame(image: HTMLImageElement): void {
+    const chromeHeight = Math.max(
+      0,
+      Math.ceil(window.innerHeight - (viewportRef.current?.clientHeight ?? image.clientHeight)),
+    );
+    const width = image.naturalWidth;
+    const height = image.naturalHeight + chromeHeight;
+    const key = `${width}x${height}`;
+    if (width <= 0 || height <= 0 || key === lastContentSizeRef.current) {
+      return;
+    }
+
+    lastContentSizeRef.current = key;
+    void window.electronAPI.resizeVideoObserver(streamId, width, height).catch(() => undefined);
+  }
+
   return (
     <div className="video-observer-window">
       <div className="video-observer-toolbar">
@@ -71,10 +89,17 @@ export function VideoObserverWindow({ streamId }: VideoObserverWindowProps) {
         </span>
         <span className="video-observer-frame-count">帧数: {frameCount}</span>
       </div>
-      <div className="video-observer-viewport">
+      <div className="video-observer-viewport" ref={viewportRef}>
         {frameUrl ? (
           // eslint-disable-next-line jsx-a11y/img-redundant-alt
-          <img src={frameUrl} alt="Vision stream frame" className="video-observer-frame" />
+          <img
+            src={frameUrl}
+            alt="Vision stream frame"
+            className="video-observer-frame"
+            onLoad={(event) => {
+              fitWindowToFrame(event.currentTarget);
+            }}
+          />
         ) : (
           <div className="video-observer-placeholder">{message}</div>
         )}

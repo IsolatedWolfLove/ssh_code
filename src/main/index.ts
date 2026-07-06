@@ -4,7 +4,7 @@ import { execFile } from 'node:child_process';
 import os from 'node:os';
 import { promisify } from 'node:util';
 
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, screen, shell } from 'electron';
 
 import { IPC_CHANNELS } from '../shared/contracts';
 import type {
@@ -332,15 +332,18 @@ async function disposeWindowSession(webContentsId: number): Promise<void> {
 
 function createVideoObserverWindow(streamId: string, ownerWebContentsId: number): BrowserWindow {
   const ownerSession = windowSessions.get(ownerWebContentsId);
+  const ownerBounds = ownerSession?.window.getBounds();
   const observer = new BrowserWindow({
     width: 960,
     height: 620,
-    minWidth: 480,
-    minHeight: 360,
-    parent: ownerSession?.window,
+    minWidth: 260,
+    minHeight: 180,
+    x: ownerBounds ? ownerBounds.x + 36 : undefined,
+    y: ownerBounds ? ownerBounds.y + 36 : undefined,
     backgroundColor: '#000000',
     title: '视觉观测 · Vision Observer',
     autoHideMenuBar: true,
+    minimizable: true,
     webPreferences: {
       preload: resolvePreloadPath(),
       contextIsolation: true,
@@ -369,6 +372,22 @@ function createVideoObserverWindow(streamId: string, ownerWebContentsId: number)
   });
 
   return observer;
+}
+
+function resizeVideoObserverWindow(streamId: string, senderId: number, width: number, height: number): void {
+  const observer = videoObserverWindows.get(streamId);
+  if (!observer || observer.isDestroyed() || observer.webContents.id !== senderId) {
+    return;
+  }
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return;
+  }
+
+  const { workArea } = screen.getDisplayMatching(observer.getBounds());
+  observer.setContentSize(
+    Math.min(Math.max(260, Math.round(width)), Math.max(260, workArea.width - 80)),
+    Math.min(Math.max(180, Math.round(height)), Math.max(180, workArea.height - 80)),
+  );
 }
 
 function getSessionManager(webContentsId: number): SshSessionManager {
@@ -585,6 +604,9 @@ function registerIpc(): void {
         await owner.sessionManager.stopVideoStream(streamId);
       }
     }
+  });
+  ipcMain.handle(IPC_CHANNELS.videoObserverResize, (event, streamId: string, width: number, height: number) => {
+    resizeVideoObserverWindow(streamId, event.sender.id, width, height);
   });
 }
 

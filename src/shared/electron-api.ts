@@ -70,6 +70,7 @@ export interface ElectronApi {
   disableVisionMode: () => Promise<void>;
   startVideoStream: (input: StartVideoStreamInput) => Promise<StartVideoStreamResult>;
   stopVideoStream: (streamId: string) => Promise<void>;
+  resizeVideoObserver: (streamId: string, width: number, height: number) => Promise<void>;
   onVideoFrame: (callback: (event: VideoFrameEvent) => void) => () => void;
   onVideoStreamState: (callback: (event: VideoStreamStateEvent) => void) => () => void;
 }

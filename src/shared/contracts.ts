@@ -323,6 +323,7 @@ export const IPC_CHANNELS = {
   visionModeDisable: 'vision:disable',
   videoStreamStart: 'video:streamStart',
   videoStreamStop: 'video:streamStop',
+  videoObserverResize: 'video:observerResize',
   videoFrameEvent: 'video:frame',
   videoStreamStateEvent: 'video:streamState',
 } as const;

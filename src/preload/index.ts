@@ -86,6 +86,8 @@ const electronApi: ElectronApi = {
   disableVisionMode: () => ipcRenderer.invoke(IPC_CHANNELS.visionModeDisable),
   startVideoStream: (input) => ipcRenderer.invoke(IPC_CHANNELS.videoStreamStart, input),
   stopVideoStream: (streamId) => ipcRenderer.invoke(IPC_CHANNELS.videoStreamStop, streamId),
+  resizeVideoObserver: (streamId, width, height) =>
+    ipcRenderer.invoke(IPC_CHANNELS.videoObserverResize, streamId, width, height),
   onVideoFrame: (callback) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => {
       callback(payload);

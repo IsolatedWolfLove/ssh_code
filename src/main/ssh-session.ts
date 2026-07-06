@@ -45,6 +45,12 @@ import type {
     TunnelEvent,
     TunnelRuntimeState,
     TunnelSnapshot,
+    EnsureVirtualDisplayResult,
+    StartVideoStreamInput,
+    StartVideoStreamResult,
+    VideoFrameEvent,
+    VideoStreamStateEvent,
+    EnableVisionModeResult,
   } from '../shared/contracts';
 
 const DIRECTORY_MASK = 0o040000;
@@ -53,12 +59,27 @@ const DEFAULT_SEARCH_RESULT_LIMIT = 200;
 const READDIR_CACHE_TTL_MS = 5000;
 const TERMINAL_FLUSH_INTERVAL_MS = 16;
 const OPTIONAL_SPLIT_READY_TIMEOUT_MS = 4000;
+const VISION_DEFAULT_DISPLAY = ':99';
+const VISION_DISPLAY_CHECK_TIMEOUT_MS = 8000;
+// Common absolute install locations for a distro-packaged ffmpeg, checked before
+// falling back to whatever `ffmpeg` resolves to on the remote user's PATH. This
+// avoids picking up a ffmpeg from an active conda/venv environment that was built
+// without x11grab support (common with conda-forge's ffmpeg package).
+const FFMPEG_CANDIDATE_PATHS = ['/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg', '/bin/ffmpeg'];
 const { Client, utils } = ssh2;
 
 type ConnectionListener = (payload: ConnectionStatePayload) => void;
 type TerminalListener = (payload: TerminalEvent) => void;
 type TunnelListener = (payload: TunnelEvent) => void;
 type FileOperationListener = (payload: FileOperationEvent) => void;
+type VideoFrameListener = (payload: VideoFrameEvent) => void;
+type VideoStreamStateListener = (payload: VideoStreamStateEvent) => void;
+
+interface ActiveVideoStreamSession {
+  channel: ClientChannel;
+  buffer: Buffer;
+  seq: number;
+}
 
 interface CachedDirectoryEntry {
   expiresAt: number;
@@ -397,6 +418,11 @@ export class SshSessionManager {
   private directoryCache = new Map<string, CachedDirectoryEntry>();
   private homeDir: string | null = null;
   private activeConnectMetadata: ConnectMetadata | null = null;
+  private videoFrameListeners = new Set<VideoFrameListener>();
+  private videoStreamStateListeners = new Set<VideoStreamStateListener>();
+  private videoStreams = new Map<string, ActiveVideoStreamSession>();
+  private visionModeDisplay: string | null = null;
+  private resolvedFfmpegPath: string | null = null;
 
   onConnectionState(listener: ConnectionListener): () => void {
     this.connectionListeners.add(listener);
@@ -424,6 +450,20 @@ export class SshSessionManager {
     this.fileOperationListeners.add(listener);
     return () => {
       this.fileOperationListeners.delete(listener);
+    };
+  }
+
+  onVideoFrameEvent(listener: VideoFrameListener): () => void {
+    this.videoFrameListeners.add(listener);
+    return () => {
+      this.videoFrameListeners.delete(listener);
+    };
+  }
+
+  onVideoStreamStateEvent(listener: VideoStreamStateListener): () => void {
+    this.videoStreamStateListeners.add(listener);
+    return () => {
+      this.videoStreamStateListeners.delete(listener);
     };
   }
 
@@ -516,6 +556,13 @@ export class SshSessionManager {
     this.isClosing = true;
 
     await this.stopAllTunnels();
+
+    const videoStreamIds = [...this.videoStreams.keys()];
+    for (const streamId of videoStreamIds) {
+      await this.stopVideoStream(streamId).catch(() => undefined);
+    }
+    this.visionModeDisplay = null;
+    this.resolvedFfmpegPath = null;
 
     const terminals = [...this.terminals.values()];
     this.terminals.clear();
@@ -1077,6 +1124,10 @@ export class SshSessionManager {
       });
     });
 
+    if (this.visionModeDisplay) {
+      await this.writeTerminal(terminalId, `export DISPLAY=${this.visionModeDisplay}\r`).catch(() => undefined);
+    }
+
     return { terminalId };
   }
 
@@ -1103,6 +1154,228 @@ export class SshSessionManager {
       type: 'exit',
       terminalId,
     });
+  }
+
+  /**
+   * Ensures a virtual X display (Xvfb) is running on the remote host.
+   * Idempotent: if a matching Xvfb process is already running, it is left alone.
+   * This lets headless vision nodes (no physical monitor) have a real X server
+   * to render into, which we can then capture with ffmpeg x11grab.
+   */
+  async ensureVirtualDisplay(display: string = VISION_DEFAULT_DISPLAY): Promise<EnsureVirtualDisplayResult> {
+    const normalizedDisplay = display.trim() || VISION_DEFAULT_DISPLAY;
+    const checkCommand = `pgrep -f ${quoteForShell(`Xvfb ${normalizedDisplay} `)} >/dev/null 2>&1 && echo RUNNING || echo NOTRUNNING`;
+    const check = await this.execRemoteCommand(checkCommand);
+    if (check.stdout.includes('RUNNING')) {
+      return { display: normalizedDisplay, alreadyRunning: true };
+    }
+
+    const startCommand = [
+      'command -v Xvfb >/dev/null 2>&1 || { echo "XVFB_MISSING" >&2; exit 127; }',
+      `nohup Xvfb ${normalizedDisplay} -screen 0 1280x720x24 >/tmp/sshstudio-xvfb-${normalizedDisplay.replace(/[^\w]/g, '')}.log 2>&1 &`,
+      'disown',
+    ].join('\n');
+
+    const started = await this.execRemoteCommand(startCommand);
+    if (started.exitCode === 127 || started.stderr.includes('XVFB_MISSING')) {
+      throw new Error('Xvfb is not installed on the remote host. Install it with: sudo apt install xvfb');
+    }
+
+    // Give Xvfb a brief moment to bind its socket before callers try to use the display.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    const confirm = await this.execRemoteCommand(checkCommand);
+    if (!confirm.stdout.includes('RUNNING')) {
+      throw new Error(`Unable to start Xvfb on display ${normalizedDisplay}`);
+    }
+
+    return { display: normalizedDisplay, alreadyRunning: false };
+  }
+
+  /**
+   * Enables "vision mode": ensures a virtual display exists, then injects
+   * `export DISPLAY=...` into every currently open terminal so any command
+   * run from now on (including re-running an already-written vision program)
+   * will render into the virtual display instead of trying to reach a
+   * physical/forwarded X server. Newly opened terminals automatically pick up
+   * the same DISPLAY via createTerminal().
+   */
+  async enableVisionMode(display?: string): Promise<EnableVisionModeResult> {
+    const { display: resolvedDisplay } = await this.ensureVirtualDisplay(display ?? VISION_DEFAULT_DISPLAY);
+    this.visionModeDisplay = resolvedDisplay;
+
+    const exportLine = `export DISPLAY=${resolvedDisplay}\r`;
+    for (const terminalId of this.terminals.keys()) {
+      await this.writeTerminal(terminalId, exportLine).catch(() => undefined);
+    }
+
+    return { display: resolvedDisplay };
+  }
+
+  disableVisionMode(): void {
+    this.visionModeDisplay = null;
+  }
+
+  /**
+   * Finds an ffmpeg binary on the remote host that actually supports the
+   * x11grab input device, and caches the result for the lifetime of this
+   * session. This deliberately checks well-known distro install paths before
+   * falling back to plain `ffmpeg` (PATH lookup), because a user's default
+   * shell environment may have a conda/venv environment active whose ffmpeg
+   * build lacks x11grab support (common with the conda-forge ffmpeg package).
+   * Picking that one up silently would let the ffmpeg process exit immediately
+   * with "Unknown input format: 'x11grab'", producing no frames (or garbled
+   * partial output) with no obvious error surfaced to the user.
+   */
+  private async resolveFfmpegBinary(): Promise<string> {
+    if (this.resolvedFfmpegPath) {
+      return this.resolvedFfmpegPath;
+    }
+
+    const candidates = [...FFMPEG_CANDIDATE_PATHS, 'ffmpeg'];
+    for (const candidate of candidates) {
+      const probeCommand = `command -v ${quoteForShell(candidate)} >/dev/null 2>&1 && ${quoteForShell(
+        candidate,
+      )} -hide_banner -formats 2>&1 | grep -q x11grab && echo SUPPORTED || echo UNSUPPORTED`;
+      const result = await this.execRemoteCommand(probeCommand).catch(() => null);
+      if (result?.stdout.includes('SUPPORTED')) {
+        this.resolvedFfmpegPath = candidate;
+        return candidate;
+      }
+    }
+
+    throw new Error(
+      'No ffmpeg with x11grab support was found on the remote host (checked /usr/bin, /usr/local/bin, /bin, and PATH). ' +
+        'If ffmpeg is only available inside a conda/venv environment, that build likely lacks x11grab support. ' +
+        'Install a distro package (e.g. `sudo apt install ffmpeg`) to enable vision mode.',
+    );
+  }
+
+  /**
+   * Starts an ffmpeg x11grab capture of the given virtual display and streams
+   * MJPEG frames back over the existing SSH connection (via a plain exec
+   * channel, same pattern as execRemoteCommand). Frames are split on JPEG
+   * SOI/EOI byte markers (FFD8...FFD9) as they arrive and emitted individually
+   * so the renderer never has to do its own demuxing.
+   */
+  async startVideoStream(input: StartVideoStreamInput): Promise<StartVideoStreamResult> {
+    const client = this.requireInteractiveClient();
+    const streamId = randomUUID();
+    const size = `${Math.max(1, Math.round(input.width))}x${Math.max(1, Math.round(input.height))}`;
+    const fps = Math.max(1, Math.min(60, Math.round(input.fps)));
+    const quality = Math.max(2, Math.min(31, Math.round(input.quality)));
+    const ffmpegBinary = await this.resolveFfmpegBinary();
+
+    const command = [
+      `${quoteForShell(ffmpegBinary)} -loglevel error`,
+      `-f x11grab -video_size ${size} -framerate ${fps} -i ${quoteForShell(input.display)}`,
+      `-vf fps=${fps}`,
+      `-f mjpeg -q:v ${quality} -threads 1`,
+      'pipe:1',
+    ].join(' ');
+
+    return new Promise<StartVideoStreamResult>((resolve, reject) => {
+      client.exec(command, (error, channel) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        const session: ActiveVideoStreamSession = {
+          channel,
+          buffer: Buffer.alloc(0),
+          seq: 0,
+        };
+        this.videoStreams.set(streamId, session);
+
+        let stderrOutput = '';
+        channel.stderr.on('data', (chunk: Buffer | string) => {
+          stderrOutput += chunk.toString();
+        });
+
+        channel.on('data', (chunk: Buffer) => {
+          if (this.videoStreams.get(streamId) !== session) {
+            return;
+          }
+
+          session.buffer = Buffer.concat([session.buffer, chunk]);
+          this.drainVideoFrames(streamId, session);
+        });
+
+        channel.on('close', (exitCode: number | null) => {
+          if (this.videoStreams.get(streamId) !== session) {
+            return;
+          }
+
+          this.videoStreams.delete(streamId);
+          if (exitCode !== 0 && exitCode !== null) {
+            this.emitVideoStreamStateEvent({
+              streamId,
+              status: 'error',
+              message: stderrOutput.trim() || `ffmpeg exited with code ${exitCode}`,
+            });
+          } else {
+            this.emitVideoStreamStateEvent({ streamId, status: 'stopped' });
+          }
+        });
+
+        channel.on('error', (channelError: Error) => {
+          if (this.videoStreams.get(streamId) !== session) {
+            return;
+          }
+
+          this.videoStreams.delete(streamId);
+          this.emitVideoStreamStateEvent({
+            streamId,
+            status: 'error',
+            message: getErrorMessage(channelError, 'Video stream error'),
+          });
+        });
+
+        this.emitVideoStreamStateEvent({ streamId, status: 'running' });
+        resolve({ streamId });
+      });
+    });
+  }
+
+  private drainVideoFrames(streamId: string, session: ActiveVideoStreamSession): void {
+    const SOI = Buffer.from([0xff, 0xd8]);
+    const EOI = Buffer.from([0xff, 0xd9]);
+
+    let start = session.buffer.indexOf(SOI);
+    while (start !== -1) {
+      const end = session.buffer.indexOf(EOI, start + SOI.length);
+      if (end === -1) {
+        // Incomplete frame: drop any garbage before the current SOI and wait for more data.
+        if (start > 0) {
+          session.buffer = session.buffer.subarray(start);
+        }
+        return;
+      }
+
+      const frameEnd = end + EOI.length;
+      const frame = session.buffer.subarray(start, frameEnd);
+      this.emitVideoFrameEvent({
+        streamId,
+        data: new Uint8Array(frame),
+        seq: session.seq,
+      });
+      session.seq += 1;
+
+      session.buffer = session.buffer.subarray(frameEnd);
+      start = session.buffer.indexOf(SOI);
+    }
+  }
+
+  async stopVideoStream(streamId: string): Promise<void> {
+    const session = this.videoStreams.get(streamId);
+    this.videoStreams.delete(streamId);
+    if (!session) {
+      return;
+    }
+
+    destroyChannel(session.channel);
+    this.emitVideoStreamStateEvent({ streamId, status: 'stopped' });
   }
 
   listTunnelSnapshots(configs: SavedTunnelConfig[]): TunnelSnapshot[] {
@@ -1597,6 +1870,18 @@ export class SshSessionManager {
 
   private emitFileOperationEvent(payload: FileOperationEvent): void {
     for (const listener of this.fileOperationListeners) {
+      listener(payload);
+    }
+  }
+
+  private emitVideoFrameEvent(payload: VideoFrameEvent): void {
+    for (const listener of this.videoFrameListeners) {
+      listener(payload);
+    }
+  }
+
+  private emitVideoStreamStateEvent(payload: VideoStreamStateEvent): void {
+    for (const listener of this.videoStreamStateListeners) {
       listener(payload);
     }
   }
@@ -3330,6 +3615,8 @@ export class SshSessionManager {
     for (const [, terminal] of terminalEntries) {
       this.destroyTerminalSession(terminal);
     }
+    this.videoStreams.clear();
+    this.visionModeDisplay = null;
     this.homeDir = null;
     this.directoryCache.clear();
 

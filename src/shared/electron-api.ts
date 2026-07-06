@@ -6,6 +6,7 @@ import type {
   ConnectResult,
   ConnectionStatePayload,
   DownloadRemoteEntryInput,
+  EnableVisionModeResult,
   FileOperationEvent,
   FileOperationResult,
   RenameRemoteEntryInput,
@@ -17,11 +18,15 @@ import type {
   SavedTunnelConfig,
   SearchRemoteFilesInput,
   SearchRemoteFilesResult,
+  StartVideoStreamInput,
+  StartVideoStreamResult,
   TailscaleHostSummary,
   TerminalEvent,
   TunnelEvent,
   TunnelSnapshot,
   UploadLocalEntriesInput,
+  VideoFrameEvent,
+  VideoStreamStateEvent,
 } from './contracts';
 
 export interface ElectronApi {
@@ -61,4 +66,10 @@ export interface ElectronApi {
   onTunnelEvent: (callback: (event: TunnelEvent) => void) => () => void;
   onConnectionState: (callback: (state: ConnectionStatePayload) => void) => () => void;
   onFileOperationEvent: (callback: (event: FileOperationEvent) => void) => () => void;
+  enableVisionMode: (display?: string) => Promise<EnableVisionModeResult>;
+  disableVisionMode: () => Promise<void>;
+  startVideoStream: (input: StartVideoStreamInput) => Promise<StartVideoStreamResult>;
+  stopVideoStream: (streamId: string) => Promise<void>;
+  onVideoFrame: (callback: (event: VideoFrameEvent) => void) => () => void;
+  onVideoStreamState: (callback: (event: VideoStreamStateEvent) => void) => () => void;
 }

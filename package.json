@@ -45,6 +45,7 @@
   "build": {
     "appId": "com.fyt.sshstudio",
     "productName": "SSH Studio",
+    "npmRebuild": false,
     "directories": {
       "output": "release",
       "buildResources": "build"

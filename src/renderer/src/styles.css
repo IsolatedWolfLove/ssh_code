@@ -2007,3 +2007,77 @@ button {
     min-width: 140px;
   }
 }
+
+.vision-mode-button.vision-mode-active {
+  background: rgba(255, 120, 110, 0.16);
+  border-color: rgba(255, 120, 110, 0.4);
+  color: #ff9d92;
+}
+
+.video-observer-window {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: #000000;
+  color: var(--text-primary);
+  font-family: "IBM Plex Sans", "Segoe UI", "Noto Sans", sans-serif;
+}
+
+.video-observer-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  background: rgba(13, 19, 27, 0.92);
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 0.8rem;
+}
+
+.video-observer-status {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.video-observer-status-running {
+  color: #4fd18b;
+}
+
+.video-observer-status-error {
+  color: #ff786e;
+}
+
+.video-observer-status-stopped {
+  color: var(--text-muted);
+}
+
+.video-observer-frame-count {
+  color: var(--text-secondary);
+}
+
+.video-observer-viewport {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: #000000;
+}
+
+.video-observer-frame {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+
+.video-observer-placeholder {
+  color: var(--text-muted);
+  font-size: 0.95rem;
+}
+
+.video-observer-error-banner {
+  padding: 8px 14px;
+  background: rgba(255, 120, 110, 0.14);
+  color: #ff9d92;
+  font-size: 0.82rem;
+  border-top: 1px solid rgba(255, 120, 110, 0.3);
+}

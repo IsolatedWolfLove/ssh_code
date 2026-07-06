@@ -1,5 +1,5 @@
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
-import { Check, ChevronDown, CircleAlert, Copy, ExternalLink, FolderSearch, PlugZap, RefreshCw, Search, Download, Upload, Trash2, PencilLine, TerminalSquare, X } from 'lucide-react';
+import { Camera, Check, ChevronDown, CircleAlert, Copy, ExternalLink, FolderSearch, PlugZap, RefreshCw, Search, Download, Upload, Trash2, PencilLine, TerminalSquare, X } from 'lucide-react';
 import { Suspense, lazy, startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import type {
@@ -385,6 +385,9 @@ export function App() {
   const [reconnectBusy, setReconnectBusy] = useState(false);
   const [tailscaleAuthDialog, setTailscaleAuthDialog] = useState<TailscaleAuthDialogState | null>(null);
   const [editorRevealTarget, setEditorRevealTarget] = useState<{ tabId: string; line: number; column: number } | null>(null);
+  const [visionModeActive, setVisionModeActive] = useState(false);
+  const [visionModeBusy, setVisionModeBusy] = useState(false);
+  const [visionStreamId, setVisionStreamId] = useState<string | null>(null);
   const autoSaveTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const directoryLoadPromisesRef = useRef(new Map<string, Promise<boolean>>());
   const idlePrefetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -789,6 +792,8 @@ export function App() {
       await window.electronAPI.disconnect();
       setEntriesByDirectory({});
       setExpandedDirectories(new Set());
+      setVisionModeActive(false);
+      setVisionStreamId(null);
     } catch (error) {
       disconnectingManuallyRef.current = false;
       setStatusMessage(getErrorMessage(error, 'Unable to disconnect'));
@@ -1517,6 +1522,57 @@ export function App() {
     setTunnelsDialogOpen(true);
   }
 
+  async function startVisionMode(): Promise<void> {
+    if (!isConnected) {
+      setStatusMessage('Connect before starting vision mode');
+      return;
+    }
+
+    setVisionModeBusy(true);
+    try {
+      const { display } = await window.electronAPI.enableVisionMode();
+      const { streamId } = await window.electronAPI.startVideoStream({
+        display,
+        width: 1280,
+        height: 720,
+        fps: 15,
+        quality: 5,
+      });
+      setVisionModeActive(true);
+      setVisionStreamId(streamId);
+      setStatusMessage(`Vision mode enabled on ${display}. DISPLAY exported to all open terminals.`);
+    } catch (error) {
+      setStatusMessage(getErrorMessage(error, 'Unable to start vision mode'));
+    } finally {
+      setVisionModeBusy(false);
+    }
+  }
+
+  async function stopVisionMode(): Promise<void> {
+    setVisionModeBusy(true);
+    try {
+      if (visionStreamId) {
+        await window.electronAPI.stopVideoStream(visionStreamId);
+      }
+      await window.electronAPI.disableVisionMode();
+      setVisionModeActive(false);
+      setVisionStreamId(null);
+      setStatusMessage('Vision mode stopped');
+    } catch (error) {
+      setStatusMessage(getErrorMessage(error, 'Unable to stop vision mode'));
+    } finally {
+      setVisionModeBusy(false);
+    }
+  }
+
+  async function toggleVisionMode(): Promise<void> {
+    if (visionModeActive) {
+      await stopVisionMode();
+    } else {
+      await startVisionMode();
+    }
+  }
+
   async function saveTunnel(config: SavedTunnelConfig): Promise<void> {
     if (!currentSavedConnectionId) {
       throw new Error('No saved connection available for tunnels');
@@ -2044,6 +2100,18 @@ export function App() {
             >
               <PlugZap size={13} />
               <span>Tunnels</span>
+            </button>
+            <button
+              type="button"
+              className={`menu-button topbar-tool-button vision-mode-button${visionModeActive ? ' vision-mode-active' : ''}`}
+              disabled={!isConnected || visionModeBusy}
+              onClick={() => {
+                void toggleVisionMode();
+              }}
+              title="开启后会在远程主机上启动虚拟显示，并向所有已打开终端注入 DISPLAY 环境变量，无需修改视觉代码本身"
+            >
+              <Camera size={13} />
+              <span>{visionModeActive ? '停止视觉观测' : '视觉观测'}</span>
             </button>
           </div>
 

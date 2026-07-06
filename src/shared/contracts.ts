@@ -181,6 +181,39 @@ export interface CreateTerminalResult {
   terminalId: string;
 }
 
+export interface EnsureVirtualDisplayResult {
+  display: string;
+  alreadyRunning: boolean;
+}
+
+export interface StartVideoStreamInput {
+  display: string;
+  width: number;
+  height: number;
+  fps: number;
+  quality: number;
+}
+
+export interface StartVideoStreamResult {
+  streamId: string;
+}
+
+export interface VideoFrameEvent {
+  streamId: string;
+  data: Uint8Array;
+  seq: number;
+}
+
+export interface VideoStreamStateEvent {
+  streamId: string;
+  status: 'running' | 'stopped' | 'error';
+  message?: string;
+}
+
+export interface EnableVisionModeResult {
+  display: string;
+}
+
 export type TunnelKind = 'local' | 'remote' | 'dynamic';
 export type TunnelStatus = 'stopped' | 'starting' | 'running' | 'error';
 
@@ -286,4 +319,10 @@ export const IPC_CHANNELS = {
   tunnelEvent: 'tunnel:event',
   connectionState: 'connection:state',
   fileOperationEvent: 'fileOperation:event',
+  visionModeEnable: 'vision:enable',
+  visionModeDisable: 'vision:disable',
+  videoStreamStart: 'video:streamStart',
+  videoStreamStop: 'video:streamStop',
+  videoFrameEvent: 'video:frame',
+  videoStreamStateEvent: 'video:streamState',
 } as const;

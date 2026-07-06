@@ -18,6 +18,7 @@ import type {
   SavedTunnelConfig,
   SaveRemoteFileInput,
   SearchRemoteFilesInput,
+  StartVideoStreamInput,
   TailscaleHostSummary,
   UploadLocalEntriesInput,
 } from '../shared/contracts';
@@ -31,9 +32,15 @@ interface WindowSession {
   unsubscribeTerminalEvent: () => void;
   unsubscribeTunnelEvent: () => void;
   unsubscribeFileOperationEvent: () => void;
+  unsubscribeVideoFrameEvent: () => void;
+  unsubscribeVideoStreamStateEvent: () => void;
 }
 
 const windowSessions = new Map<number, WindowSession>();
+// streamId -> observer window showing that stream's frames.
+const videoObserverWindows = new Map<string, BrowserWindow>();
+// streamId -> webContentsId of the main window that owns the underlying SSH session/stream.
+const videoStreamOwners = new Map<string, number>();
 let ipcRegistered = false;
 let savedConnectionStore: SavedConnectionStore | null = null;
 const execFileAsync = promisify(execFile);
@@ -246,6 +253,24 @@ function createMainWindow(): BrowserWindow {
       window.webContents.send(IPC_CHANNELS.fileOperationEvent, payload);
     }
   });
+  // Video frames/state are routed only to the dedicated observer window for that
+  // stream (not broadcast to the owning main window), since the main window has
+  // no use for raw frame data and forwarding it there would waste CPU/memory.
+  const unsubscribeVideoFrameEvent = sessionManager.onVideoFrameEvent((payload) => {
+    const observer = videoObserverWindows.get(payload.streamId);
+    if (observer && !observer.isDestroyed()) {
+      observer.webContents.send(IPC_CHANNELS.videoFrameEvent, payload);
+    }
+  });
+  const unsubscribeVideoStreamStateEvent = sessionManager.onVideoStreamStateEvent((payload) => {
+    const observer = videoObserverWindows.get(payload.streamId);
+    if (observer && !observer.isDestroyed()) {
+      observer.webContents.send(IPC_CHANNELS.videoStreamStateEvent, payload);
+    }
+    if (!window.isDestroyed()) {
+      window.webContents.send(IPC_CHANNELS.videoStreamStateEvent, payload);
+    }
+  });
 
   windowSessions.set(webContentsId, {
     window,
@@ -254,10 +279,12 @@ function createMainWindow(): BrowserWindow {
     unsubscribeTerminalEvent,
     unsubscribeTunnelEvent,
     unsubscribeFileOperationEvent,
+    unsubscribeVideoFrameEvent,
+    unsubscribeVideoStreamStateEvent,
   });
 
-  if (process.env.VITE_DEV_SERVER_URL) {
-    void window.loadURL(process.env.VITE_DEV_SERVER_URL);
+  if (process.env.ELECTRON_RENDERER_URL) {
+    void window.loadURL(process.env.ELECTRON_RENDERER_URL);
   } else {
     void window.loadFile(path.join(__dirname, '../renderer/index.html'));
   }
@@ -280,12 +307,68 @@ async function disposeWindowSession(webContentsId: number): Promise<void> {
   session.unsubscribeTerminalEvent();
   session.unsubscribeTunnelEvent();
   session.unsubscribeFileOperationEvent();
+  session.unsubscribeVideoFrameEvent();
+  session.unsubscribeVideoStreamStateEvent();
+
+  for (const [streamId, ownerId] of [...videoStreamOwners.entries()]) {
+    if (ownerId !== webContentsId) {
+      continue;
+    }
+
+    videoStreamOwners.delete(streamId);
+    const observer = videoObserverWindows.get(streamId);
+    videoObserverWindows.delete(streamId);
+    if (observer && !observer.isDestroyed()) {
+      observer.close();
+    }
+  }
 
   try {
     await session.sessionManager.disconnect();
   } catch {
     // Ignore shutdown errors while the window is already closing.
   }
+}
+
+function createVideoObserverWindow(streamId: string, ownerWebContentsId: number): BrowserWindow {
+  const ownerSession = windowSessions.get(ownerWebContentsId);
+  const observer = new BrowserWindow({
+    width: 960,
+    height: 620,
+    minWidth: 480,
+    minHeight: 360,
+    parent: ownerSession?.window,
+    backgroundColor: '#000000',
+    title: '视觉观测 · Vision Observer',
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: resolvePreloadPath(),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+
+  const hash = `#/video-observer/${encodeURIComponent(streamId)}`;
+  if (process.env.ELECTRON_RENDERER_URL) {
+    void observer.loadURL(`${process.env.ELECTRON_RENDERER_URL}${hash}`);
+  } else {
+    void observer.loadFile(path.join(__dirname, '../renderer/index.html'), { hash });
+  }
+
+  videoObserverWindows.set(streamId, observer);
+  videoStreamOwners.set(streamId, ownerWebContentsId);
+
+  observer.once('closed', () => {
+    videoObserverWindows.delete(streamId);
+    videoStreamOwners.delete(streamId);
+    const owner = windowSessions.get(ownerWebContentsId);
+    if (owner) {
+      void owner.sessionManager.stopVideoStream(streamId).catch(() => undefined);
+    }
+  });
+
+  return observer;
 }
 
 function getSessionManager(webContentsId: number): SshSessionManager {
@@ -477,6 +560,32 @@ function registerIpc(): void {
   ipcMain.handle(IPC_CHANNELS.tunnelsStop, (event, tunnelId: string) =>
     getSessionManager(event.sender.id).stopTunnel(tunnelId),
   );
+  ipcMain.handle(IPC_CHANNELS.visionModeEnable, (event, display?: string) =>
+    getSessionManager(event.sender.id).enableVisionMode(display),
+  );
+  ipcMain.handle(IPC_CHANNELS.visionModeDisable, (event) => {
+    getSessionManager(event.sender.id).disableVisionMode();
+  });
+  ipcMain.handle(IPC_CHANNELS.videoStreamStart, async (event, input: StartVideoStreamInput) => {
+    const result = await getSessionManager(event.sender.id).startVideoStream(input);
+    createVideoObserverWindow(result.streamId, event.sender.id);
+    return result;
+  });
+  ipcMain.handle(IPC_CHANNELS.videoStreamStop, async (_event, streamId: string) => {
+    const observer = videoObserverWindows.get(streamId);
+    videoObserverWindows.delete(streamId);
+    const ownerId = videoStreamOwners.get(streamId);
+    videoStreamOwners.delete(streamId);
+    if (observer && !observer.isDestroyed()) {
+      observer.close();
+    }
+    if (ownerId !== undefined) {
+      const owner = windowSessions.get(ownerId);
+      if (owner) {
+        await owner.sessionManager.stopVideoStream(streamId);
+      }
+    }
+  });
 }
 
 app.whenReady().then(() => {

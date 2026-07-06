@@ -82,6 +82,30 @@ const electronApi: ElectronApi = {
       ipcRenderer.removeListener(IPC_CHANNELS.fileOperationEvent, listener);
     };
   },
+  enableVisionMode: (display) => ipcRenderer.invoke(IPC_CHANNELS.visionModeEnable, display),
+  disableVisionMode: () => ipcRenderer.invoke(IPC_CHANNELS.visionModeDisable),
+  startVideoStream: (input) => ipcRenderer.invoke(IPC_CHANNELS.videoStreamStart, input),
+  stopVideoStream: (streamId) => ipcRenderer.invoke(IPC_CHANNELS.videoStreamStop, streamId),
+  onVideoFrame: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => {
+      callback(payload);
+    };
+
+    ipcRenderer.on(IPC_CHANNELS.videoFrameEvent, listener);
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.videoFrameEvent, listener);
+    };
+  },
+  onVideoStreamState: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => {
+      callback(payload);
+    };
+
+    ipcRenderer.on(IPC_CHANNELS.videoStreamStateEvent, listener);
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.videoStreamStateEvent, listener);
+    };
+  },
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronApi);

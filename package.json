@@ -1,6 +1,6 @@
 {
   "name": "ssh-studio",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "private": true,
   "description": "Desktop SSH client with SFTP file tree, Monaco editor, and integrated terminal.",
   "author": {
@@ -16,6 +16,7 @@
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit",
     "package:deb": "npm run build && electron-builder --linux deb --x64 --publish never",
+    "package:mac": "npm run build && electron-builder --mac dmg zip --publish never",
     "package:win": "npm run build && electron-builder --win nsis --x64 --publish never",
     "package": "npm run build && electron-builder --publish never"
   },

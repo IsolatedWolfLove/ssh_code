@@ -22,6 +22,13 @@ jobs:
             runs_on: ubuntu-22.04
             package_command: npm run package:deb
             artifact_path: release/*.deb
+          - label: macOS DMG
+            platform: macos
+            runs_on: macos-14
+            package_command: npm run package:mac
+            artifact_path: |
+              release/*.dmg
+              release/*.zip
           - label: Windows EXE
             platform: windows
             runs_on: windows-2022
@@ -86,6 +93,8 @@ jobs:
 
       - name: Build release package
         shell: bash
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ matrix.platform == 'macos' && 'false' || '' }}
         run: ${{ matrix.package_command }}
 
       - name: Upload workflow artifact

@@ -32,6 +32,7 @@ import { QuickCommandsDialog, type QuickCommandItem } from './components/QuickCo
 import { SearchDialog } from './components/SearchDialog';
 import { TerminalPanel, type TerminalPanelHandle } from './components/TerminalPanel';
 import { TunnelsDialog } from './components/TunnelsDialog';
+import { useRemoteLanguageServer } from './use-remote-language-server';
 
 const RemoteEditor = lazy(() => import('./components/RemoteEditor'));
 
@@ -46,6 +47,7 @@ const DEFAULT_CONNECTION_FORM: ConnectInput = {
   agentSocket: '',
   hostVerification: 'off',
   knownHostsPath: '',
+  jumpHost: undefined,
 };
 
 const DEFAULT_CONNECTION_STATUS: ConnectionStatePayload = {
@@ -402,6 +404,15 @@ export function App() {
     () => tabs.find((tab) => tab.id === activeTabId) ?? null,
     [activeTabId, tabs],
   );
+  const languageServerState = useRemoteLanguageServer({
+    connectionId: currentConnectionId,
+    connected: connectionStatus.state === 'connected',
+    workspacePath,
+    tabs,
+    onOpenLocation: async (remotePath, line, column) => {
+      await openFile(remotePath, { line, column });
+    },
+  });
   const groupedSearchResults = useMemo(() => {
     const grouped = new Map<string, SearchRemoteFilesResult['matches']>();
     for (const match of searchResults?.matches ?? []) {
@@ -1021,6 +1032,7 @@ export function App() {
       privateKeyPath: '',
       passphrase: '',
       agentSocket: '',
+      jumpHost: undefined,
     };
   }
 
@@ -2379,6 +2391,19 @@ export function App() {
         </div>
         <div className="statusbar-section">
           <span>{autoSaveEnabled ? 'Auto Save On' : 'Auto Save Off'}</span>
+        </div>
+        <div className={`statusbar-section statusbar-lsp statusbar-lsp-${languageServerState.status}`} title={languageServerState.message}>
+          <span>
+            LSP {languageServerState.status === 'ready'
+              ? 'Ready'
+              : languageServerState.status === 'starting'
+                ? 'Starting'
+                : languageServerState.status === 'unavailable'
+                  ? 'Unavailable'
+                  : languageServerState.status === 'error'
+                    ? 'Error'
+                    : 'Idle'}
+          </span>
         </div>
         <div className="statusbar-section">
           <span>{activeTunnelCount} tunnel{activeTunnelCount === 1 ? '' : 's'} active</span>

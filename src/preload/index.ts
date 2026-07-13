@@ -108,6 +108,33 @@ const electronApi: ElectronApi = {
       ipcRenderer.removeListener(IPC_CHANNELS.videoStreamStateEvent, listener);
     };
   },
+  startLanguageServer: (input) => ipcRenderer.invoke(IPC_CHANNELS.languageServerStart, input),
+  stopLanguageServer: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.languageServerStop, sessionId),
+  openLanguageDocument: (input) => ipcRenderer.invoke(IPC_CHANNELS.languageServerDocumentOpen, input),
+  changeLanguageDocument: (input) => ipcRenderer.invoke(IPC_CHANNELS.languageServerDocumentChange, input),
+  saveLanguageDocument: (input) => ipcRenderer.invoke(IPC_CHANNELS.languageServerDocumentSave, input),
+  closeLanguageDocument: (input) => ipcRenderer.invoke(IPC_CHANNELS.languageServerDocumentClose, input),
+  requestLanguageFeature: (input) => ipcRenderer.invoke(IPC_CHANNELS.languageServerFeature, input),
+  onLanguageServerDiagnostics: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => {
+      callback(payload);
+    };
+
+    ipcRenderer.on(IPC_CHANNELS.languageServerDiagnosticsEvent, listener);
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.languageServerDiagnosticsEvent, listener);
+    };
+  },
+  onLanguageServerState: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => {
+      callback(payload);
+    };
+
+    ipcRenderer.on(IPC_CHANNELS.languageServerStateEvent, listener);
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.languageServerStateEvent, listener);
+    };
+  },
 };
 
 contextBridge.exposeInMainWorld('electronAPI', electronApi);

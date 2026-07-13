@@ -389,6 +389,21 @@ button {
   box-shadow: 0 0 0 3px rgba(55, 210, 200, 0.12);
 }
 
+.jump-host-fields {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: rgba(9, 14, 20, 0.32);
+}
+
+.jump-host-heading {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+}
+
 .dialog-backdrop {
   position: fixed;
   inset: 0;
@@ -2082,4 +2097,97 @@ button {
   color: #ff9d92;
   font-size: 0.82rem;
   border-top: 1px solid rgba(255, 120, 110, 0.3);
+}
+
+/* Visual refinement: clearer hierarchy for connection and workspace views. */
+:root {
+  --bg-app: #0b1017;
+  --bg-panel: #111820;
+  --bg-panel-elevated: #17212b;
+  --bg-editor: #0f161f;
+  --bg-accent: #162632;
+  --bg-hover: #1b2a36;
+  --bg-terminal: #080d13;
+  --text-primary: #e2ebf3;
+  --text-secondary: #a8b7c7;
+  --text-muted: #748497;
+  --line-soft: rgba(154, 178, 199, 0.16);
+  --line-strong: rgba(154, 178, 199, 0.3);
+  background: var(--bg-app);
+}
+
+body { font-synthesis: none; }
+
+.topbar { padding: 0 14px; background: #0d131b; }
+
+.product-name {
+  color: var(--text-primary);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.menu-button:hover,
+.menu-button-open { background: rgba(255, 255, 255, 0.07); }
+
+.launch-screen {
+  padding: clamp(24px, 5vh, 56px) 28px;
+  background-image:
+    linear-gradient(90deg, rgba(55, 210, 200, 0.03) 1px, transparent 1px),
+    linear-gradient(rgba(55, 210, 200, 0.025) 1px, transparent 1px);
+  background-size: 48px 48px;
+}
+
+.launch-card {
+  width: min(640px, 100%);
+  background: #101720;
+  box-shadow: 0 28px 72px rgba(0, 0, 0, 0.34);
+  overflow: hidden;
+}
+
+.connection-form { gap: 14px; background: #101720; }
+.connection-form-launch { padding: 28px; }
+
+.connection-copy h1 { font-size: 1.625rem; line-height: 1.2; }
+.connection-copy p { max-width: 480px; margin: 8px 0 2px; }
+.section-heading { font-weight: 600; }
+.connection-form input { background: #0b1118; }
+
+.connection-form input::placeholder,
+.search-input::placeholder { color: #647486; }
+
+.saved-connections { padding-top: 16px; }
+.saved-connections-list { gap: 8px; }
+
+.saved-connection-button {
+  padding: 13px 14px;
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.saved-connection-button:hover { background: rgba(55, 210, 200, 0.06); }
+.primary-button { background: #37d2c8; }
+.primary-button:not(:disabled):hover { background: #51ddd4; }
+
+.secondary-button:not(:disabled):hover,
+.status-action-button:not(:disabled):hover {
+  border-color: rgba(55, 210, 200, 0.4);
+  background: rgba(55, 210, 200, 0.08);
+  color: var(--text-primary);
+}
+
+.sidebar { background: #0e151d; }
+.sidebar-toolbar { padding: 14px 14px 8px; border-bottom: 1px solid rgba(154, 178, 199, 0.1); }
+.tree-workspace-button { background: rgba(255, 255, 255, 0.025); }
+.tree-row { height: 32px; }
+.editor-panel { background: var(--bg-editor); }
+.tab-strip { padding: 6px 10px 0; background: #0d141c; }
+.tab-item { background: rgba(255, 255, 255, 0.035); }
+.terminal-panel { background: #0a1017; }
+.statusbar { padding: 0 14px; background: #0b1118; }
+
+@media (max-width: 640px) {
+  .launch-screen { padding: 16px; background-image: none; }
+  .connection-form-launch { padding: 20px; }
+  .connection-copy h1 { font-size: 1.375rem; }
+  .saved-connection-button-label span { display: none; }
 }

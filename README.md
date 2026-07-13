@@ -13,6 +13,7 @@ SSH Studio is a desktop SSH workspace for working on remote machines without bou
 - Browse remote folders over SFTP, then open any folder as the active workspace.
 - Create, rename, delete, upload, and download remote files or folders.
 - Edit remote files in Monaco with tabs, language detection, dirty-state markers, manual save, and autosave.
+- Use remote TypeScript/JavaScript completion, hover, diagnostics, and go-to-definition when a language server is installed in the workspace or remote PATH.
 - Save files through a temporary-file write plus remote rename/fallback replacement path.
 - Search the workspace with remote `rg` when available, then fall back to SFTP scanning.
 - Run multiple xterm.js terminals, including tabs and split terminal views.
@@ -34,7 +35,9 @@ SSH Studio is a desktop SSH workspace for working on remote machines without bou
 - A remote host reachable by SSH/SFTP.
 - Optional local `tailscale` CLI for Tailscale host discovery.
 - Optional remote `rg` for faster workspace search.
+- Optional remote `typescript-language-server` and `typescript` for TypeScript/JavaScript language intelligence.
 - Optional remote `Xvfb` and `ffmpeg` with X11 capture support for Vision Mode.
+- Go 1.20+ for building all remote server platform assets.
 
 ## Development
 
@@ -43,10 +46,13 @@ npm install
 npm run dev
 ```
 
+Build the local Linux server asset during development with `npm run server:build`. Release packaging builds the Linux and macOS x64/arm64 assets with `npm run server:build:all`. The server uses the SSH stdio channel and does not open a remote TCP port.
+
 ## Quality Checks
 
 ```bash
 npm run typecheck
+npm test
 npm run build
 ```
 

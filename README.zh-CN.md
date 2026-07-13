@@ -13,6 +13,7 @@ SSH Studio 是一个桌面端 SSH 远程工作区工具，用来把终端、SFTP
 - 通过 SFTP 浏览远程目录，也可以把任意远程目录打开为当前工作区。
 - 支持创建、重命名、删除、上传和下载远程文件或文件夹。
 - Monaco 多标签远程编辑，支持语言识别、未保存状态、手动保存和自动保存。
+- 工作区或远端 PATH 安装语言服务器后，支持 TypeScript/JavaScript 补全、Hover、诊断和跳转定义。
 - 保存远程文件时使用临时文件写入，再远程重命名或替代写入，降低中断风险。
 - 工作区搜索会优先使用远程 `rg`，不可用时自动退回 SFTP 扫描。
 - 内置 xterm.js 终端，支持多个终端标签和终端分屏。
@@ -34,7 +35,9 @@ SSH Studio 是一个桌面端 SSH 远程工作区工具，用来把终端、SFTP
 - 目标机器需要可以通过 SSH/SFTP 访问。
 - 可选：本机安装 `tailscale` CLI，用于 Tailscale 主机发现。
 - 可选：远程机器安装 `rg`，用于更快的工作区搜索。
+- 可选：远程工作区安装 `typescript-language-server` 和 `typescript`，用于 TypeScript/JavaScript 语言智能。
 - 可选：远程机器安装支持 X11 捕获的 `Xvfb` 和 `ffmpeg`，用于 Vision Mode。
+- 构建全部远端 server 平台产物时需要 Go 1.20 或更高版本。
 
 ## 开发
 
@@ -43,10 +46,13 @@ npm install
 npm run dev
 ```
 
+开发时使用 `npm run server:build` 构建本机 Linux server 产物。发布打包会通过 `npm run server:build:all` 构建 Linux 和 macOS 的 x64/arm64 产物。server 使用 SSH 的 stdio 通道通信，不会在远端开放 TCP 端口。
+
 ## 质量检查
 
 ```bash
 npm run typecheck
+npm test
 npm run build
 ```
 

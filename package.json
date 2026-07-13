@@ -14,14 +14,19 @@
     "dev": "electron-vite dev",
     "build": "npm run typecheck && electron-vite build",
     "preview": "electron-vite preview",
+    "server:build": "node scripts/build-server.mjs",
+    "server:build:all": "SERVER_TARGETS=all node scripts/build-server.mjs",
+    "server:test": "go test ./...",
     "typecheck": "tsc --noEmit",
-    "package:deb": "npm run build && electron-builder --linux deb --x64 --publish never",
-    "package:mac": "npm run build && electron-builder --mac dmg zip --publish never",
-    "package:win": "npm run build && electron-builder --win nsis --x64 --publish never",
-    "package": "npm run build && electron-builder --publish never"
+    "test": "vitest run",
+    "package:deb": "npm run server:build:all && npm run build && electron-builder --linux deb --x64 --publish never",
+    "package:mac": "npm run server:build:all && npm run build && electron-builder --mac dmg zip --publish never",
+    "package:win": "npm run server:build:all && npm run build && electron-builder --win nsis --x64 --publish never",
+    "package": "npm run server:build:all && npm run build && electron-builder --publish never"
   },
   "dependencies": {
-    "ssh2": "^1.16.0"
+    "ssh2": "^1.16.0",
+    "vscode-jsonrpc": "^9.0.1"
   },
   "devDependencies": {
     "@monaco-editor/react": "^4.7.0",
@@ -41,7 +46,8 @@
     "react-dom": "^19.1.0",
     "react-resizable-panels": "^2.1.7",
     "typescript": "^5.8.3",
-    "vite": "^6.3.5"
+    "vite": "^6.3.5",
+    "vitest": "^4.1.10"
   },
   "build": {
     "appId": "com.fyt.sshstudio",
@@ -54,6 +60,13 @@
     "files": [
       "out/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/server",
+        "to": "server",
+        "filter": ["**/*"]
+      }
     ],
     "linux": {
       "target": [

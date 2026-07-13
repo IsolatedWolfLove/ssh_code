@@ -39,6 +39,12 @@ import type {
     FileConflictStrategy,
     FileOperationEvent,
     FileOperationResult,
+    LanguageServerDiagnosticsEvent,
+    LanguageServerDocumentChangeInput,
+    LanguageServerDocumentInput,
+    LanguageServerDocumentReference,
+    LanguageServerFeatureInput,
+    LanguageServerStateEvent,
     UploadLocalEntriesInput,
     DownloadRemoteEntryInput,
     TerminalEvent,
@@ -48,10 +54,13 @@ import type {
     EnsureVirtualDisplayResult,
     StartVideoStreamInput,
     StartVideoStreamResult,
+    StartLanguageServerInput,
+    StartLanguageServerResult,
     VideoFrameEvent,
     VideoStreamStateEvent,
     EnableVisionModeResult,
   } from '../shared/contracts';
+import { RemoteLanguageServerManager } from './language-server-manager';
 
 const DIRECTORY_MASK = 0o040000;
 const TYPE_MASK = 0o170000;
@@ -74,6 +83,8 @@ type TunnelListener = (payload: TunnelEvent) => void;
 type FileOperationListener = (payload: FileOperationEvent) => void;
 type VideoFrameListener = (payload: VideoFrameEvent) => void;
 type VideoStreamStateListener = (payload: VideoStreamStateEvent) => void;
+type LanguageServerDiagnosticsListener = (payload: LanguageServerDiagnosticsEvent) => void;
+type LanguageServerStateListener = (payload: LanguageServerStateEvent) => void;
 
 interface ActiveVideoStreamSession {
   channel: ClientChannel;
@@ -388,6 +399,7 @@ function destroyChannel(channel: ClientChannel): void {
 
 export class SshSessionManager {
   private interactiveClient: SshClient | null = null;
+  private jumpClient: SshClient | null = null;
   private activeConnectConfig: ConnectConfig | null = null;
   private sftp: SFTPWrapper | null = null;
   private auxiliaryClient: SshClient | null = null;
@@ -423,6 +435,7 @@ export class SshSessionManager {
   private videoStreams = new Map<string, ActiveVideoStreamSession>();
   private visionModeDisplay: string | null = null;
   private resolvedFfmpegPath: string | null = null;
+  private languageServers = new RemoteLanguageServerManager();
 
   onConnectionState(listener: ConnectionListener): () => void {
     this.connectionListeners.add(listener);
@@ -467,6 +480,14 @@ export class SshSessionManager {
     };
   }
 
+  onLanguageServerDiagnostics(listener: LanguageServerDiagnosticsListener): () => void {
+    return this.languageServers.onDiagnostics(listener);
+  }
+
+  onLanguageServerState(listener: LanguageServerStateListener): () => void {
+    return this.languageServers.onState(listener);
+  }
+
   async connect(input: ConnectInput): Promise<ConnectResult> {
     await this.disconnect();
 
@@ -480,6 +501,17 @@ export class SshSessionManager {
 
     try {
       const config = await this.buildConnectConfig(input);
+      if (input.jumpHost) {
+        const jumpConfig = await this.buildConnectConfig({
+          ...input,
+          ...input.jumpHost,
+          hostVerification: 'off',
+          knownHostsPath: '',
+          jumpHost: undefined,
+        });
+        this.jumpClient = await this.createConnectedClient(jumpConfig);
+        config.sock = await this.createJumpStream(this.jumpClient, config.host!, config.port!);
+      }
       const interactiveClient = await this.createConnectedClient(config, {
         authMethod: input.authMethod ?? 'password',
       });
@@ -520,6 +552,9 @@ export class SshSessionManager {
       this.interactiveClient?.removeAllListeners();
       this.interactiveClient?.end();
       this.interactiveClient = null;
+      this.jumpClient?.removeAllListeners();
+      this.jumpClient?.end();
+      this.jumpClient = null;
       this.activeConnectConfig = null;
       this.activeConnectMetadata = null;
       this.sftp = null;
@@ -555,6 +590,7 @@ export class SshSessionManager {
   async disconnect(): Promise<void> {
     this.isClosing = true;
 
+    await this.languageServers.stopAll();
     await this.stopAllTunnels();
 
     const videoStreamIds = [...this.videoStreams.keys()];
@@ -578,6 +614,8 @@ export class SshSessionManager {
 
     const interactiveClient = this.interactiveClient;
     this.interactiveClient = null;
+    const jumpClient = this.jumpClient;
+    this.jumpClient = null;
     this.activeConnectConfig = null;
     this.activeConnectMetadata = null;
     this.sftp = null;
@@ -608,6 +646,11 @@ export class SshSessionManager {
       auxiliaryClient.end();
     }
 
+    if (jumpClient) {
+      jumpClient.removeAllListeners();
+      jumpClient.end();
+    }
+
     this.emitConnectionState({
       state: 'disconnected',
       message: 'Disconnected',
@@ -636,6 +679,34 @@ export class SshSessionManager {
     });
 
     return nextEntries;
+  }
+
+  startLanguageServer(input: StartLanguageServerInput): Promise<StartLanguageServerResult> {
+    return this.languageServers.start(this.requireInteractiveClient(), input);
+  }
+
+  stopLanguageServer(sessionId: string): Promise<void> {
+    return this.languageServers.stop(sessionId);
+  }
+
+  openLanguageDocument(input: LanguageServerDocumentInput): Promise<void> {
+    return this.languageServers.openDocument(input);
+  }
+
+  changeLanguageDocument(input: LanguageServerDocumentChangeInput): Promise<void> {
+    return this.languageServers.changeDocument(input);
+  }
+
+  saveLanguageDocument(input: LanguageServerDocumentReference): Promise<void> {
+    return this.languageServers.saveDocument(input);
+  }
+
+  closeLanguageDocument(input: LanguageServerDocumentReference): Promise<void> {
+    return this.languageServers.closeDocument(input);
+  }
+
+  requestLanguageFeature(input: LanguageServerFeatureInput): Promise<unknown> {
+    return this.languageServers.requestFeature(input);
   }
 
   async readFile(remotePath: string): Promise<RemoteFilePayload> {
@@ -3190,6 +3261,10 @@ export class SshSessionManager {
   }
 
   private async createConnectedClient(config: ConnectConfig, metadata?: ConnectMetadata): Promise<SshClient> {
+    const effectiveConfig: ConnectConfig =
+      this.jumpClient && !config.sock
+        ? { ...config, sock: await this.createJumpStream(this.jumpClient, config.host!, config.port!) }
+        : config;
     const client = new Client();
     let authUrl: string | null = null;
 
@@ -3235,7 +3310,7 @@ export class SshSessionManager {
             ...this.state,
             state: 'connecting',
             message,
-            host: this.host ?? config.host,
+            host: this.host ?? effectiveConfig.host,
             filesystemState: 'idle',
             authUrl,
             recoveryHint: 'Open the login link, finish Tailscale verification, then retry if the session does not continue.',
@@ -3250,7 +3325,7 @@ export class SshSessionManager {
       client.once('error', reject);
     });
 
-    client.connect(config);
+    client.connect(effectiveConfig);
     await ready;
     return client;
   }
@@ -3572,6 +3647,18 @@ export class SshSessionManager {
     };
   }
 
+  private createJumpStream(client: SshClient, host: string, port: number): Promise<ClientChannel> {
+    return new Promise<ClientChannel>((resolve, reject) => {
+      client.forwardOut('127.0.0.1', 0, host, port, (error, stream) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(stream);
+      });
+    });
+  }
+
   private handleAuxiliaryDisconnect(message: string): void {
     if (this.isClosing) {
       return;
@@ -3594,6 +3681,7 @@ export class SshSessionManager {
     }
 
     const terminalEntries = [...this.terminals.entries()];
+    void this.languageServers.stopAll();
     void this.stopAllTunnels().finally(() => {
       this.tunnelStates.clear();
     });

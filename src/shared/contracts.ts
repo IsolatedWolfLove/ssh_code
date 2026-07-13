@@ -11,6 +11,17 @@ export type ConnectionDiagnosticCode =
   | 'authenticationFailed'
   | 'unknown';
 
+export interface JumpHostInput {
+  host: string;
+  port: number;
+  username: string;
+  authMethod: Exclude<AuthMethod, 'tailscale'>;
+  password: string;
+  privateKeyPath?: string;
+  passphrase?: string;
+  agentSocket?: string;
+}
+
 export interface ConnectInput {
   host: string;
   port: number;
@@ -22,6 +33,7 @@ export interface ConnectInput {
   agentSocket?: string;
   hostVerification?: HostVerificationMode;
   knownHostsPath?: string;
+  jumpHost?: JumpHostInput;
 }
 
 export interface ConnectResult {
@@ -282,6 +294,82 @@ export interface TunnelEvent {
   state: TunnelRuntimeState;
 }
 
+export type LanguageServerLanguage = 'typescript';
+export type LanguageServerStatus = 'starting' | 'ready' | 'stopped' | 'unavailable' | 'error';
+export type LanguageServerFeature = 'completion' | 'hover' | 'definition';
+
+export interface StartLanguageServerInput {
+  workspacePath: string;
+  language: LanguageServerLanguage;
+}
+
+export interface StartLanguageServerResult {
+  sessionId: string;
+  workspacePath: string;
+  language: LanguageServerLanguage;
+}
+
+export interface LanguageServerDocumentInput {
+  sessionId: string;
+  remotePath: string;
+  languageId: string;
+  version: number;
+  text: string;
+}
+
+export interface LanguageServerDocumentChangeInput {
+  sessionId: string;
+  remotePath: string;
+  version: number;
+  contentChanges: Array<{
+    range?: LanguageServerRange;
+    rangeLength?: number;
+    text: string;
+  }>;
+}
+
+export interface LanguageServerDocumentReference {
+  sessionId: string;
+  remotePath: string;
+}
+
+export interface LanguageServerPosition {
+  line: number;
+  character: number;
+}
+
+export interface LanguageServerFeatureInput extends LanguageServerDocumentReference {
+  feature: LanguageServerFeature;
+  position: LanguageServerPosition;
+}
+
+export interface LanguageServerRange {
+  start: LanguageServerPosition;
+  end: LanguageServerPosition;
+}
+
+export interface LanguageServerDiagnostic {
+  range: LanguageServerRange;
+  severity?: number;
+  code?: string | number;
+  source?: string;
+  message: string;
+}
+
+export interface LanguageServerDiagnosticsEvent {
+  sessionId: string;
+  remotePath: string;
+  diagnostics: LanguageServerDiagnostic[];
+}
+
+export interface LanguageServerStateEvent {
+  sessionId?: string;
+  workspacePath: string;
+  language: LanguageServerLanguage;
+  status: LanguageServerStatus;
+  message: string;
+}
+
 export const IPC_CHANNELS = {
   openNewWindow: 'window:openNew',
   openExternal: 'shell:openExternal',
@@ -326,4 +414,13 @@ export const IPC_CHANNELS = {
   videoObserverResize: 'video:observerResize',
   videoFrameEvent: 'video:frame',
   videoStreamStateEvent: 'video:streamState',
+  languageServerStart: 'languageServer:start',
+  languageServerStop: 'languageServer:stop',
+  languageServerDocumentOpen: 'languageServer:documentOpen',
+  languageServerDocumentChange: 'languageServer:documentChange',
+  languageServerDocumentSave: 'languageServer:documentSave',
+  languageServerDocumentClose: 'languageServer:documentClose',
+  languageServerFeature: 'languageServer:feature',
+  languageServerDiagnosticsEvent: 'languageServer:diagnostics',
+  languageServerStateEvent: 'languageServer:state',
 } as const;

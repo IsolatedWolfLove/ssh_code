@@ -95,6 +95,14 @@ export function ConnectionForm({
   const ActionIcon = connected ? RefreshCw : PlugZap;
   const authMethod = value.authMethod ?? 'password';
   const hostVerification = value.hostVerification ?? 'off';
+  const jumpHost = value.jumpHost;
+  const hasInvalidJumpHost =
+    jumpHost !== undefined &&
+    (jumpHost.host.trim() === '' ||
+      jumpHost.username.trim() === '' ||
+      (jumpHost.authMethod === 'password' && jumpHost.password === '') ||
+      (jumpHost.authMethod === 'privateKey' && (jumpHost.privateKeyPath ?? '').trim() === '') ||
+      (jumpHost.authMethod === 'agent' && (jumpHost.agentSocket ?? '').trim() === ''));
 
   function toggleSavedConnectionWorkspaces(savedConnectionId: string): void {
     setExpandedSavedConnectionIds((previous) => {
@@ -187,6 +195,56 @@ export function ConnectionForm({
               <input value={value.username} onChange={handleField('username')} placeholder="root" />
             </label>
           </div>
+
+          <label className="toggle-row connection-toggle-row">
+            <input
+              type="checkbox"
+              checked={Boolean(jumpHost)}
+              onChange={(event) => {
+                onChange({
+                  ...value,
+                  jumpHost: event.target.checked
+                    ? { host: '', port: 22, username: '', authMethod: 'password', password: '', privateKeyPath: '', passphrase: '', agentSocket: '' }
+                    : undefined,
+                });
+              }}
+            />
+            <span>Use SSH jump host</span>
+          </label>
+
+          {jumpHost ? (
+            <div className="jump-host-fields">
+              <div className="jump-host-heading">Jump Host</div>
+              <label>
+                <span>Host</span>
+                <input
+                  value={jumpHost.host}
+                  onChange={(event) => onChange({ ...value, jumpHost: { ...jumpHost, host: event.target.value } })}
+                  placeholder="bastion.example.com"
+                />
+              </label>
+              <div className="field-row">
+                <label>
+                  <span>Port</span>
+                  <input value={String(jumpHost.port)} inputMode="numeric" onChange={(event) => onChange({ ...value, jumpHost: { ...jumpHost, port: Number(event.target.value) || 22 } })} />
+                </label>
+                <label>
+                  <span>User</span>
+                  <input value={jumpHost.username} onChange={(event) => onChange({ ...value, jumpHost: { ...jumpHost, username: event.target.value } })} placeholder="root" />
+                </label>
+              </div>
+              <div className="auth-choice-row">
+                {(['password', 'privateKey', 'agent'] as const).map((method) => (
+                  <button key={method} type="button" className={`auth-choice-button ${jumpHost.authMethod === method ? 'auth-choice-button-active' : ''}`} onClick={() => onChange({ ...value, jumpHost: { ...jumpHost, authMethod: method } })}>
+                    <span>{method === 'password' ? 'Password' : method === 'privateKey' ? 'SSH Key' : 'Agent'}</span>
+                  </button>
+                ))}
+              </div>
+              {jumpHost.authMethod === 'password' ? <label><span>Password</span><input type="password" value={jumpHost.password} onChange={(event) => onChange({ ...value, jumpHost: { ...jumpHost, password: event.target.value } })} placeholder="Jump host password" /></label> : null}
+              {jumpHost.authMethod === 'privateKey' ? <><label><span>Private Key</span><input value={jumpHost.privateKeyPath ?? ''} onChange={(event) => onChange({ ...value, jumpHost: { ...jumpHost, privateKeyPath: event.target.value } })} placeholder="Path to private key file" /></label><label><span>Passphrase</span><input type="password" value={jumpHost.passphrase ?? ''} onChange={(event) => onChange({ ...value, jumpHost: { ...jumpHost, passphrase: event.target.value } })} placeholder="Optional key passphrase" /></label></> : null}
+              {jumpHost.authMethod === 'agent' ? <label><span>Agent Socket</span><input value={jumpHost.agentSocket ?? ''} onChange={(event) => onChange({ ...value, jumpHost: { ...jumpHost, agentSocket: event.target.value } })} placeholder="Path to SSH agent socket or pipe" /></label> : null}
+            </div>
+          ) : null}
         </>
       ) : (
         <div className="tailscale-mode-panel">
@@ -283,6 +341,7 @@ export function ConnectionForm({
             (authMethod === 'password' && value.password === '') ||
             (authMethod === 'privateKey' && (value.privateKeyPath ?? '').trim() === '') ||
             (authMethod === 'agent' && (value.agentSocket ?? '').trim() === '') ||
+            hasInvalidJumpHost ||
             (authMethod !== 'tailscale' &&
               hostVerification === 'knownHosts' &&
               (value.knownHostsPath ?? '').trim() === '')

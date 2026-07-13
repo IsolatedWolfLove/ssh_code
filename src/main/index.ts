@@ -14,11 +14,16 @@ import type {
   DownloadRemoteEntryInput,
   FileOperationEvent,
   FileOperationResult,
+  LanguageServerDocumentChangeInput,
+  LanguageServerDocumentInput,
+  LanguageServerDocumentReference,
+  LanguageServerFeatureInput,
   RenameRemoteEntryInput,
   SavedTunnelConfig,
   SaveRemoteFileInput,
   SearchRemoteFilesInput,
   StartVideoStreamInput,
+  StartLanguageServerInput,
   TailscaleHostSummary,
   UploadLocalEntriesInput,
 } from '../shared/contracts';
@@ -34,6 +39,8 @@ interface WindowSession {
   unsubscribeFileOperationEvent: () => void;
   unsubscribeVideoFrameEvent: () => void;
   unsubscribeVideoStreamStateEvent: () => void;
+  unsubscribeLanguageServerDiagnostics: () => void;
+  unsubscribeLanguageServerState: () => void;
 }
 
 const windowSessions = new Map<number, WindowSession>();
@@ -271,6 +278,16 @@ function createMainWindow(): BrowserWindow {
       window.webContents.send(IPC_CHANNELS.videoStreamStateEvent, payload);
     }
   });
+  const unsubscribeLanguageServerDiagnostics = sessionManager.onLanguageServerDiagnostics((payload) => {
+    if (!window.isDestroyed()) {
+      window.webContents.send(IPC_CHANNELS.languageServerDiagnosticsEvent, payload);
+    }
+  });
+  const unsubscribeLanguageServerState = sessionManager.onLanguageServerState((payload) => {
+    if (!window.isDestroyed()) {
+      window.webContents.send(IPC_CHANNELS.languageServerStateEvent, payload);
+    }
+  });
 
   windowSessions.set(webContentsId, {
     window,
@@ -281,6 +298,8 @@ function createMainWindow(): BrowserWindow {
     unsubscribeFileOperationEvent,
     unsubscribeVideoFrameEvent,
     unsubscribeVideoStreamStateEvent,
+    unsubscribeLanguageServerDiagnostics,
+    unsubscribeLanguageServerState,
   });
 
   if (process.env.ELECTRON_RENDERER_URL) {
@@ -309,6 +328,8 @@ async function disposeWindowSession(webContentsId: number): Promise<void> {
   session.unsubscribeFileOperationEvent();
   session.unsubscribeVideoFrameEvent();
   session.unsubscribeVideoStreamStateEvent();
+  session.unsubscribeLanguageServerDiagnostics();
+  session.unsubscribeLanguageServerState();
 
   for (const [streamId, ownerId] of [...videoStreamOwners.entries()]) {
     if (ownerId !== webContentsId) {
@@ -608,6 +629,27 @@ function registerIpc(): void {
   ipcMain.handle(IPC_CHANNELS.videoObserverResize, (event, streamId: string, width: number, height: number) => {
     resizeVideoObserverWindow(streamId, event.sender.id, width, height);
   });
+  ipcMain.handle(IPC_CHANNELS.languageServerStart, (event, input: StartLanguageServerInput) =>
+    getSessionManager(event.sender.id).startLanguageServer(input),
+  );
+  ipcMain.handle(IPC_CHANNELS.languageServerStop, (event, sessionId: string) =>
+    getSessionManager(event.sender.id).stopLanguageServer(sessionId),
+  );
+  ipcMain.handle(IPC_CHANNELS.languageServerDocumentOpen, (event, input: LanguageServerDocumentInput) =>
+    getSessionManager(event.sender.id).openLanguageDocument(input),
+  );
+  ipcMain.handle(IPC_CHANNELS.languageServerDocumentChange, (event, input: LanguageServerDocumentChangeInput) =>
+    getSessionManager(event.sender.id).changeLanguageDocument(input),
+  );
+  ipcMain.handle(IPC_CHANNELS.languageServerDocumentSave, (event, input: LanguageServerDocumentReference) =>
+    getSessionManager(event.sender.id).saveLanguageDocument(input),
+  );
+  ipcMain.handle(IPC_CHANNELS.languageServerDocumentClose, (event, input: LanguageServerDocumentReference) =>
+    getSessionManager(event.sender.id).closeLanguageDocument(input),
+  );
+  ipcMain.handle(IPC_CHANNELS.languageServerFeature, (event, input: LanguageServerFeatureInput) =>
+    getSessionManager(event.sender.id).requestLanguageFeature(input),
+  );
 }
 
 app.whenReady().then(() => {

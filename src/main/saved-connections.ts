@@ -4,7 +4,7 @@ import path from 'node:path';
 
 import { safeStorage } from 'electron';
 
-import type { ConnectInput, SavedConnectionSummary, SavedTunnelConfig } from '../shared/contracts';
+import type { ConnectInput, JumpHostInput, SavedConnectionSummary, SavedTunnelConfig } from '../shared/contracts';
 
 const SAVED_CONNECTIONS_FILE = 'saved-connections.json';
 const MAX_SAVED_CONNECTIONS = 12;
@@ -12,6 +12,19 @@ const MAX_WORKSPACE_PATHS = 6;
 
 type PasswordEncoding = 'safeStorage' | 'plain';
 type OptionalSecretEncoding = PasswordEncoding | 'none';
+
+interface StoredJumpHost {
+  host: string;
+  port: number;
+  username: string;
+  authMethod: JumpHostInput['authMethod'];
+  password: string;
+  passwordEncoding: OptionalSecretEncoding;
+  privateKeyPath?: string;
+  passphrase?: string;
+  passphraseEncoding?: OptionalSecretEncoding;
+  agentSocket?: string;
+}
 
 interface StoredSavedConnection {
   id: string;
@@ -28,6 +41,7 @@ interface StoredSavedConnection {
   agentSocket?: string;
   hostVerification?: NonNullable<ConnectInput['hostVerification']>;
   knownHostsPath?: string;
+  jumpHost?: StoredJumpHost;
   lastConnectedAt: string;
   lastWorkspacePath?: string;
   workspacePaths?: string[];
@@ -53,6 +67,22 @@ function isOptionalSecretEncoding(value: unknown): value is OptionalSecretEncodi
 
 function isPort(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 65535;
+}
+
+function isStoredJumpHost(value: unknown): value is StoredJumpHost {
+  return (
+    isObject(value) &&
+    typeof value.host === 'string' &&
+    isPort(value.port) &&
+    typeof value.username === 'string' &&
+    (value.authMethod === 'password' || value.authMethod === 'privateKey' || value.authMethod === 'agent') &&
+    typeof value.password === 'string' &&
+    isOptionalSecretEncoding(value.passwordEncoding) &&
+    (value.privateKeyPath === undefined || typeof value.privateKeyPath === 'string') &&
+    (value.passphrase === undefined || typeof value.passphrase === 'string') &&
+    (value.passphraseEncoding === undefined || isOptionalSecretEncoding(value.passphraseEncoding)) &&
+    (value.agentSocket === undefined || typeof value.agentSocket === 'string')
+  );
 }
 
 function isSavedTunnelConfig(value: unknown): value is SavedTunnelConfig {
@@ -185,6 +215,7 @@ function isStoredSavedConnection(value: unknown): value is StoredSavedConnection
     (value.agentSocket === undefined || typeof value.agentSocket === 'string') &&
     (value.hostVerification === undefined || value.hostVerification === 'knownHosts' || value.hostVerification === 'off') &&
     (value.knownHostsPath === undefined || typeof value.knownHostsPath === 'string') &&
+    (value.jumpHost === undefined || isStoredJumpHost(value.jumpHost)) &&
     typeof value.lastConnectedAt === 'string' &&
     (value.lastWorkspacePath === undefined || typeof value.lastWorkspacePath === 'string') &&
     (value.workspacePaths === undefined ||
@@ -298,6 +329,18 @@ export class SavedConnectionStore {
       agentSocket: connection.agentSocket ?? '',
       hostVerification: connection.hostVerification ?? 'off',
       knownHostsPath: connection.knownHostsPath ?? '',
+      jumpHost: connection.jumpHost
+        ? {
+            host: connection.jumpHost.host,
+            port: connection.jumpHost.port,
+            username: connection.jumpHost.username,
+            authMethod: connection.jumpHost.authMethod,
+            password: this.unprotectOptionalSecret(connection.jumpHost.password, connection.jumpHost.passwordEncoding),
+            privateKeyPath: connection.jumpHost.privateKeyPath ?? '',
+            passphrase: this.unprotectOptionalSecret(connection.jumpHost.passphrase ?? '', connection.jumpHost.passphraseEncoding ?? 'none'),
+            agentSocket: connection.jumpHost.agentSocket ?? '',
+          }
+        : undefined,
     };
   }
 
@@ -534,10 +577,38 @@ export class SavedConnectionStore {
       agentSocket: authMethod === 'agent' ? input.agentSocket?.trim() ?? '' : '',
       hostVerification: input.hostVerification ?? 'off',
       knownHostsPath: input.knownHostsPath?.trim() ?? '',
+      jumpHost: this.createStoredJumpHost(input.jumpHost),
       lastConnectedAt,
       lastWorkspacePath: workspacePaths[0],
       workspacePaths,
       tunnels: normalizeTunnels(previousConnection?.tunnels),
+    };
+  }
+
+  private createStoredJumpHost(input: JumpHostInput | undefined): StoredJumpHost | undefined {
+    if (!input) {
+      return undefined;
+    }
+
+    const host = input.host.trim();
+    const username = input.username.trim();
+    if (host === '' || username === '' || !isPort(input.port)) {
+      return undefined;
+    }
+
+    const password = this.protectOptionalSecret(input.authMethod === 'password' ? input.password : '');
+    const passphrase = this.protectOptionalSecret(input.authMethod === 'privateKey' ? input.passphrase ?? '' : '');
+    return {
+      host,
+      port: input.port,
+      username,
+      authMethod: input.authMethod,
+      password: password.value,
+      passwordEncoding: password.encoding,
+      privateKeyPath: input.authMethod === 'privateKey' ? input.privateKeyPath?.trim() ?? '' : '',
+      passphrase: passphrase.value,
+      passphraseEncoding: passphrase.encoding,
+      agentSocket: input.authMethod === 'agent' ? input.agentSocket?.trim() ?? '' : '',
     };
   }
 

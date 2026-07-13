@@ -9,6 +9,12 @@ import type {
   EnableVisionModeResult,
   FileOperationEvent,
   FileOperationResult,
+  LanguageServerDiagnosticsEvent,
+  LanguageServerDocumentChangeInput,
+  LanguageServerDocumentInput,
+  LanguageServerDocumentReference,
+  LanguageServerFeatureInput,
+  LanguageServerStateEvent,
   RenameRemoteEntryInput,
   RemoteDirectoryEntry,
   RemoteFilePayload,
@@ -20,6 +26,8 @@ import type {
   SearchRemoteFilesResult,
   StartVideoStreamInput,
   StartVideoStreamResult,
+  StartLanguageServerInput,
+  StartLanguageServerResult,
   TailscaleHostSummary,
   TerminalEvent,
   TunnelEvent,
@@ -73,4 +81,13 @@ export interface ElectronApi {
   resizeVideoObserver: (streamId: string, width: number, height: number) => Promise<void>;
   onVideoFrame: (callback: (event: VideoFrameEvent) => void) => () => void;
   onVideoStreamState: (callback: (event: VideoStreamStateEvent) => void) => () => void;
+  startLanguageServer: (input: StartLanguageServerInput) => Promise<StartLanguageServerResult>;
+  stopLanguageServer: (sessionId: string) => Promise<void>;
+  openLanguageDocument: (input: LanguageServerDocumentInput) => Promise<void>;
+  changeLanguageDocument: (input: LanguageServerDocumentChangeInput) => Promise<void>;
+  saveLanguageDocument: (input: LanguageServerDocumentReference) => Promise<void>;
+  closeLanguageDocument: (input: LanguageServerDocumentReference) => Promise<void>;
+  requestLanguageFeature: (input: LanguageServerFeatureInput) => Promise<unknown>;
+  onLanguageServerDiagnostics: (callback: (event: LanguageServerDiagnosticsEvent) => void) => () => void;
+  onLanguageServerState: (callback: (event: LanguageServerStateEvent) => void) => () => void;
 }

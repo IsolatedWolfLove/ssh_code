@@ -9,6 +9,11 @@ export interface EditorTabItem {
   savedContent: string;
   isSaving: boolean;
   autosaveRevision: number;
+  /** Image tabs render a preview instead of the Monaco editor and are read-only. */
+  kind?: 'text' | 'image';
+  imageDataUrl?: string;
+  byteLength?: number;
+  modifiedAt?: number;
 }
 
 interface EditorTabsProps {
@@ -44,7 +49,8 @@ export function EditorTabs({
     <div className="tab-strip">
       {tabs.map((tab) => {
         const active = tab.id === activeTabId;
-        const dirty = tab.content !== tab.savedContent;
+        const isImage = tab.kind === 'image';
+        const dirty = !isImage && tab.content !== tab.savedContent;
         const stale = currentConnectionId !== null && currentConnectionId !== tab.connectionId;
 
         return (
@@ -56,15 +62,17 @@ export function EditorTabs({
               {tab.isSaving ? <span className="tab-saving">{autoSaveEnabled ? 'autosaving' : 'saving'}</span> : null}
             </button>
 
-            <button
-              type="button"
-              className="tab-icon-button"
-              onClick={() => onSave(tab.id)}
-              disabled={!dirty || tab.isSaving || stale}
-              title="Save"
-            >
-              <Save size={13} />
-            </button>
+            {isImage ? null : (
+              <button
+                type="button"
+                className="tab-icon-button"
+                onClick={() => onSave(tab.id)}
+                disabled={!dirty || tab.isSaving || stale}
+                title="Save"
+              >
+                <Save size={13} />
+              </button>
+            )}
 
             <button type="button" className="tab-icon-button" onClick={() => onClose(tab.id)} title="Close">
               <X size={13} />

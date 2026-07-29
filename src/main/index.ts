@@ -10,7 +10,9 @@ import { IPC_CHANNELS } from '../shared/contracts';
 import type {
   ConnectInput,
   CreateRemoteEntryInput,
+  CreateTerminalInput,
   DeleteRemoteEntryInput,
+  ReadRemoteBinaryFileInput,
   DownloadRemoteEntryInput,
   FileOperationEvent,
   FileOperationResult,
@@ -18,6 +20,7 @@ import type {
   LanguageServerDocumentInput,
   LanguageServerDocumentReference,
   LanguageServerFeatureInput,
+  QueueIdleDownloadInput,
   RenameRemoteEntryInput,
   SavedTunnelConfig,
   SaveRemoteFileInput,
@@ -25,6 +28,7 @@ import type {
   StartVideoStreamInput,
   StartLanguageServerInput,
   TailscaleHostSummary,
+  TransferCapabilities,
   UploadLocalEntriesInput,
 } from '../shared/contracts';
 import { SavedConnectionStore } from './saved-connections';
@@ -37,6 +41,7 @@ interface WindowSession {
   unsubscribeTerminalEvent: () => void;
   unsubscribeTunnelEvent: () => void;
   unsubscribeFileOperationEvent: () => void;
+  unsubscribeHostMetricsEvent: () => void;
   unsubscribeVideoFrameEvent: () => void;
   unsubscribeVideoStreamStateEvent: () => void;
   unsubscribeLanguageServerDiagnostics: () => void;
@@ -51,6 +56,26 @@ const videoStreamOwners = new Map<string, number>();
 let ipcRegistered = false;
 let savedConnectionStore: SavedConnectionStore | null = null;
 const execFileAsync = promisify(execFile);
+
+let cachedLocalRsync: boolean | null = null;
+
+// The delta fast-path needs a local rsync binary to drive the transfer. This is
+// a per-machine fact, so probe once and cache it. Windows generally lacks rsync,
+// which is fine: the SFTP resumable engine is the fallback everywhere.
+async function detectLocalRsync(): Promise<boolean> {
+  if (cachedLocalRsync !== null) {
+    return cachedLocalRsync;
+  }
+
+  try {
+    await execFileAsync('rsync', ['--version'], { timeout: 4000 });
+    cachedLocalRsync = true;
+  } catch {
+    cachedLocalRsync = false;
+  }
+
+  return cachedLocalRsync;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -260,6 +285,11 @@ function createMainWindow(): BrowserWindow {
       window.webContents.send(IPC_CHANNELS.fileOperationEvent, payload);
     }
   });
+  const unsubscribeHostMetricsEvent = sessionManager.onHostMetricsEvent((payload) => {
+    if (!window.isDestroyed()) {
+      window.webContents.send(IPC_CHANNELS.hostMetricsEvent, payload);
+    }
+  });
   // Video frames/state are routed only to the dedicated observer window for that
   // stream (not broadcast to the owning main window), since the main window has
   // no use for raw frame data and forwarding it there would waste CPU/memory.
@@ -296,6 +326,7 @@ function createMainWindow(): BrowserWindow {
     unsubscribeTerminalEvent,
     unsubscribeTunnelEvent,
     unsubscribeFileOperationEvent,
+    unsubscribeHostMetricsEvent,
     unsubscribeVideoFrameEvent,
     unsubscribeVideoStreamStateEvent,
     unsubscribeLanguageServerDiagnostics,
@@ -326,6 +357,7 @@ async function disposeWindowSession(webContentsId: number): Promise<void> {
   session.unsubscribeTerminalEvent();
   session.unsubscribeTunnelEvent();
   session.unsubscribeFileOperationEvent();
+  session.unsubscribeHostMetricsEvent();
   session.unsubscribeVideoFrameEvent();
   session.unsubscribeVideoStreamStateEvent();
   session.unsubscribeLanguageServerDiagnostics();
@@ -506,6 +538,32 @@ function registerIpc(): void {
   ipcMain.handle(IPC_CHANNELS.readFile, (event, remotePath: string) =>
     getSessionManager(event.sender.id).readFile(remotePath),
   );
+  ipcMain.handle(IPC_CHANNELS.readBinaryFile, (event, input: ReadRemoteBinaryFileInput) =>
+    getSessionManager(event.sender.id).readBinaryFile(input),
+  );
+  ipcMain.handle(IPC_CHANNELS.startAutomaticMediaCache, (event, remoteDirectory: string) => {
+    const manager = getSessionManager(event.sender.id);
+    manager.startAutomaticMediaCache(remoteDirectory);
+    return manager.getIdleTransferSnapshot();
+  });
+  ipcMain.handle(IPC_CHANNELS.queueIdleDownload, async (event, input: QueueIdleDownloadInput) => {
+    let localPath = input.localPath?.trim();
+    if (!localPath) {
+      const result = await dialog.showOpenDialog(getBrowserWindow(event.sender.id), {
+        title: 'Choose folder for idle download',
+        defaultPath: app.getPath('downloads'),
+        properties: ['openDirectory', 'createDirectory'],
+      });
+      if (result.canceled || result.filePaths.length === 0) {
+        return null;
+      }
+      localPath = path.join(result.filePaths[0], path.posix.basename(input.remotePath));
+    }
+    return getSessionManager(event.sender.id).queueIdleDownload(input.remotePath, localPath);
+  });
+  ipcMain.handle(IPC_CHANNELS.idleTransferSnapshot, (event) =>
+    getSessionManager(event.sender.id).getIdleTransferSnapshot(),
+  );
   ipcMain.handle(IPC_CHANNELS.writeFileAtomic, (event, input: SaveRemoteFileInput) =>
     getSessionManager(event.sender.id).writeFileAtomic(input),
   );
@@ -539,6 +597,16 @@ function registerIpc(): void {
       return getSessionManager(event.sender.id).downloadEntry(normalizedInput);
     },
   );
+  ipcMain.handle(IPC_CHANNELS.cancelFileOperation, (event, operationId: string) =>
+    getSessionManager(event.sender.id).cancelFileOperation(operationId),
+  );
+  ipcMain.handle(IPC_CHANNELS.getTransferCapabilities, async (event): Promise<TransferCapabilities> => {
+    const [localRsync, remoteRsync] = await Promise.all([
+      detectLocalRsync(),
+      getSessionManager(event.sender.id).probeRemoteRsync(),
+    ]);
+    return { localRsync, remoteRsync };
+  });
   ipcMain.handle(IPC_CHANNELS.searchInFiles, (event, input: SearchRemoteFilesInput) =>
     getSessionManager(event.sender.id).searchInFiles(input),
   );
@@ -571,7 +639,24 @@ function registerIpc(): void {
     });
     return result.canceled ? null : (result.filePaths[0] ?? null);
   });
-  ipcMain.handle(IPC_CHANNELS.terminalCreate, (event) => getSessionManager(event.sender.id).createTerminal());
+  ipcMain.handle(IPC_CHANNELS.terminalCreate, (event, input?: CreateTerminalInput) =>
+    getSessionManager(event.sender.id).createTerminal(input),
+  );
+  ipcMain.handle(IPC_CHANNELS.terminalShellSupport, (event) =>
+    getSessionManager(event.sender.id).getRemoteShellSupport(),
+  );
+  ipcMain.handle(IPC_CHANNELS.terminalKillSession, (event, sessionName: string) =>
+    getSessionManager(event.sender.id).killRemoteShellSession(sessionName),
+  );
+  ipcMain.handle(IPC_CHANNELS.hostMetricsStart, (event, workspacePath: string, intervalMs?: number) =>
+    getSessionManager(event.sender.id).startHostMetrics(workspacePath, intervalMs),
+  );
+  ipcMain.handle(IPC_CHANNELS.hostMetricsStop, (event) => {
+    getSessionManager(event.sender.id).stopHostMetrics();
+  });
+  ipcMain.handle(IPC_CHANNELS.hostMetricsRefresh, (event, workspacePath: string) =>
+    getSessionManager(event.sender.id).collectHostMetrics(workspacePath),
+  );
   ipcMain.handle(IPC_CHANNELS.terminalWrite, (event, terminalId: string, data: string) =>
     getSessionManager(event.sender.id).writeTerminal(terminalId, data),
   );

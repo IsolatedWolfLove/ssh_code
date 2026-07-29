@@ -19,18 +19,41 @@ const electronApi: ElectronApi = {
     ipcRenderer.invoke(IPC_CHANNELS.savedConnectionsUpdateWorkspace, savedConnectionId, workspacePath),
   readDir: (remotePath) => ipcRenderer.invoke(IPC_CHANNELS.readDir, remotePath),
   readFile: (remotePath) => ipcRenderer.invoke(IPC_CHANNELS.readFile, remotePath),
+  readBinaryFile: (input) => ipcRenderer.invoke(IPC_CHANNELS.readBinaryFile, input),
+  startAutomaticMediaCache: (remoteDirectory) =>
+    ipcRenderer.invoke(IPC_CHANNELS.startAutomaticMediaCache, remoteDirectory),
+  queueIdleDownload: (input) => ipcRenderer.invoke(IPC_CHANNELS.queueIdleDownload, input),
+  getIdleTransferSnapshot: () => ipcRenderer.invoke(IPC_CHANNELS.idleTransferSnapshot),
   writeFileAtomic: (input) => ipcRenderer.invoke(IPC_CHANNELS.writeFileAtomic, input),
   createEntry: (input) => ipcRenderer.invoke(IPC_CHANNELS.createEntry, input),
   renameEntry: (input) => ipcRenderer.invoke(IPC_CHANNELS.renameEntry, input),
   deleteEntry: (input) => ipcRenderer.invoke(IPC_CHANNELS.deleteEntry, input),
   uploadLocalEntries: (input) => ipcRenderer.invoke(IPC_CHANNELS.uploadLocalEntries, input),
   downloadEntry: (input) => ipcRenderer.invoke(IPC_CHANNELS.downloadEntry, input),
+  cancelFileOperation: (operationId) => ipcRenderer.invoke(IPC_CHANNELS.cancelFileOperation, operationId),
+  getTransferCapabilities: () => ipcRenderer.invoke(IPC_CHANNELS.getTransferCapabilities),
   searchInFiles: (input) => ipcRenderer.invoke(IPC_CHANNELS.searchInFiles, input),
   pickPrivateKeyPath: () => ipcRenderer.invoke(IPC_CHANNELS.pickPrivateKeyPath),
   pickKnownHostsPath: () => ipcRenderer.invoke(IPC_CHANNELS.pickKnownHostsPath),
   pickUploadEntries: () => ipcRenderer.invoke(IPC_CHANNELS.pickUploadEntries),
   pickDownloadDirectory: () => ipcRenderer.invoke(IPC_CHANNELS.pickDownloadDirectory),
-  createTerminal: () => ipcRenderer.invoke(IPC_CHANNELS.terminalCreate),
+  createTerminal: (input) => ipcRenderer.invoke(IPC_CHANNELS.terminalCreate, input),
+  getRemoteShellSupport: () => ipcRenderer.invoke(IPC_CHANNELS.terminalShellSupport),
+  killRemoteShellSession: (sessionName) => ipcRenderer.invoke(IPC_CHANNELS.terminalKillSession, sessionName),
+  startHostMetrics: (workspacePath, intervalMs) =>
+    ipcRenderer.invoke(IPC_CHANNELS.hostMetricsStart, workspacePath, intervalMs),
+  stopHostMetrics: () => ipcRenderer.invoke(IPC_CHANNELS.hostMetricsStop),
+  refreshHostMetrics: (workspacePath) => ipcRenderer.invoke(IPC_CHANNELS.hostMetricsRefresh, workspacePath),
+  onHostMetrics: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => {
+      callback(payload);
+    };
+
+    ipcRenderer.on(IPC_CHANNELS.hostMetricsEvent, listener);
+    return () => {
+      ipcRenderer.removeListener(IPC_CHANNELS.hostMetricsEvent, listener);
+    };
+  },
   writeTerminal: (terminalId, data) => ipcRenderer.invoke(IPC_CHANNELS.terminalWrite, terminalId, data),
   resizeTerminal: (terminalId, cols, rows) =>
     ipcRenderer.invoke(IPC_CHANNELS.terminalResize, terminalId, cols, rows),

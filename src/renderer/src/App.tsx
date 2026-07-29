@@ -11,6 +11,8 @@ import type {
   FileConflictItem,
   FileConflictStrategy,
   FileOperationEvent,
+  HostMetricsEvent,
+  HostMetricsSnapshot,
   RemoteFileSystemState,
   RemoteDirectoryEntry,
   SavedConnectionSummary,
@@ -28,6 +30,8 @@ import { EntryDialog } from './components/EntryDialog';
 import { EditorTabs, type EditorTabItem } from './components/EditorTabs';
 import { FileTree } from './components/FileTree';
 import { FolderPickerDialog } from './components/FolderPickerDialog';
+import { HostMetricsBar } from './components/HostMetricsBar';
+import { ImagePreview, buildImageDataUrl, isImagePath } from './components/ImagePreview';
 import { QuickCommandsDialog, type QuickCommandItem } from './components/QuickCommandsDialog';
 import { SearchDialog } from './components/SearchDialog';
 import { TerminalPanel, type TerminalPanelHandle } from './components/TerminalPanel';
@@ -57,6 +61,10 @@ const DEFAULT_CONNECTION_STATUS: ConnectionStatePayload = {
 };
 
 const QUICK_COMMANDS_STORAGE_KEY = 'ssh-studio.quick-commands.v1';
+const HOST_METRICS_INTERVAL_MS = 4000;
+// Long enough that a training job writing plots produces a new frame between
+// reloads, short enough to feel live.
+const IMAGE_AUTO_REFRESH_INTERVAL_MS = 3000;
 
 type EntryDialogState =
   | {
@@ -96,6 +104,11 @@ interface FileOperationItem {
   currentPath?: string;
   error?: string;
   retryable?: boolean;
+  transferredBytes?: number;
+  totalBytes?: number;
+  bytesPerSecond?: number;
+  etaSeconds?: number;
+  transport?: FileOperationEvent['transport'];
 }
 
 interface FileConflictDialogState {
@@ -292,6 +305,44 @@ function getFileOperationLabel(kind: FileOperationItem['kind']): string {
   }
 }
 
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) {
+    return '0 B';
+  }
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  const precision = unit === 0 || value >= 100 ? 0 : value >= 10 ? 1 : 2;
+  return `${value.toFixed(precision)} ${units[unit]}`;
+}
+
+function formatRate(bytesPerSecond: number | undefined): string | null {
+  if (bytesPerSecond === undefined || !Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) {
+    return null;
+  }
+  return `${formatBytes(bytesPerSecond)}/s`;
+}
+
+function formatEta(seconds: number | undefined): string | null {
+  if (seconds === undefined || !Number.isFinite(seconds) || seconds < 0) {
+    return null;
+  }
+  const total = Math.round(seconds);
+  if (total < 60) {
+    return `${total}s`;
+  }
+  const minutes = Math.floor(total / 60);
+  if (minutes < 60) {
+    return `${minutes}m ${total % 60}s`;
+  }
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
 function remapTabsToConnection(
   tabs: EditorTabItem[],
   previousConnectionId: string | null,
@@ -387,6 +438,10 @@ export function App() {
   const [reconnectBusy, setReconnectBusy] = useState(false);
   const [tailscaleAuthDialog, setTailscaleAuthDialog] = useState<TailscaleAuthDialogState | null>(null);
   const [editorRevealTarget, setEditorRevealTarget] = useState<{ tabId: string; line: number; column: number } | null>(null);
+  const [hostMetrics, setHostMetrics] = useState<HostMetricsSnapshot | null>(null);
+  const [hostMetricsError, setHostMetricsError] = useState<string | null>(null);
+  const [imageAutoRefresh, setImageAutoRefresh] = useState(false);
+  const [reloadingImagePath, setReloadingImagePath] = useState<string | null>(null);
   const [visionModeActive, setVisionModeActive] = useState(false);
   const [visionModeBusy, setVisionModeBusy] = useState(false);
   const [visionStreamId, setVisionStreamId] = useState<string | null>(null);
@@ -655,6 +710,42 @@ export function App() {
   }, [connectionStatus.state, currentSavedConnectionId, saveActiveTab, showConnectionScreen]);
 
   useEffect(() => {
+    const unsubscribe = window.electronAPI.onHostMetrics((event: HostMetricsEvent) => {
+      // Snapshots from a previous connection would otherwise linger after a
+      // reconnect and describe the wrong host.
+      if (currentConnectionId && event.connectionId !== currentConnectionId) {
+        return;
+      }
+
+      if (event.snapshot) {
+        setHostMetrics(event.snapshot);
+        setHostMetricsError(null);
+        return;
+      }
+
+      setHostMetricsError(event.error ?? 'Unable to collect host metrics');
+    });
+
+    return unsubscribe;
+  }, [currentConnectionId]);
+
+  useEffect(() => {
+    if (connectionStatus.state !== 'connected') {
+      setHostMetrics(null);
+      setHostMetricsError(null);
+      return;
+    }
+
+    void window.electronAPI.startHostMetrics(workspacePath, HOST_METRICS_INTERVAL_MS).catch(() => {
+      // A failed start just leaves the strip in its unavailable state.
+    });
+
+    return () => {
+      void window.electronAPI.stopHostMetrics().catch(() => undefined);
+    };
+  }, [connectionStatus.state, currentConnectionId, workspacePath]);
+
+  useEffect(() => {
     function handlePointerDown(event: MouseEvent): void {
       if (!fileMenuRef.current?.contains(event.target as Node)) {
         setFileMenuOpen(false);
@@ -681,6 +772,23 @@ export function App() {
       }
     };
   }, []);
+
+  // Only the visible image tab is polled: a training run can be writing dozens of
+  // plots, and refreshing hidden tabs would transfer them all for nothing.
+  useEffect(() => {
+    if (!imageAutoRefresh || !activeTabId || activeTab?.kind !== 'image') {
+      return;
+    }
+
+    const tabId = activeTabId;
+    const timer = setInterval(() => {
+      void reloadImageTab(tabId);
+    }, IMAGE_AUTO_REFRESH_INTERVAL_MS);
+
+    return () => {
+      clearInterval(timer);
+    };
+  }, [activeTab?.kind, activeTabId, imageAutoRefresh, tabs, currentConnectionId]);
 
   useEffect(() => {
     if (!editorRevealTarget || activeTab?.id !== editorRevealTarget.tabId) {
@@ -836,6 +944,9 @@ export function App() {
     setSelectedTreePath(nextWorkspacePath);
     setEntriesByDirectory({});
     setExpandedDirectories(new Set([nextWorkspacePath]));
+    void window.electronAPI.startAutomaticMediaCache(nextWorkspacePath).catch(() => {
+      // Preview warming is opportunistic and must never block opening a workspace.
+    });
 
     const loaded = await refreshDirectory(nextWorkspacePath, true);
     if (loaded || nextWorkspacePath === resolvedHomeDir) {
@@ -845,6 +956,7 @@ export function App() {
     setWorkspacePath(resolvedHomeDir);
     setSelectedTreePath(resolvedHomeDir);
     setExpandedDirectories(new Set([resolvedHomeDir]));
+    void window.electronAPI.startAutomaticMediaCache(resolvedHomeDir).catch(() => undefined);
     await refreshDirectory(resolvedHomeDir, true);
   }
 
@@ -1065,6 +1177,75 @@ export function App() {
     }
   }
 
+  async function buildTextTab(connectionId: string, remotePath: string): Promise<EditorTabItem> {
+    const file = await window.electronAPI.readFile(remotePath);
+
+    return {
+      id: buildTabId(connectionId, remotePath),
+      connectionId,
+      path: file.path,
+      name: remotePath.split('/').pop() || remotePath,
+      content: file.content,
+      savedContent: file.content,
+      isSaving: false,
+      autosaveRevision: 0,
+      kind: 'text',
+    };
+  }
+
+  /**
+   * Images are read as raw bytes and shown in a preview tab. Their `content` is
+   * left empty so the dirty/save paths treat them as clean and read-only.
+   */
+  async function buildImageTab(connectionId: string, remotePath: string): Promise<EditorTabItem> {
+    const file = await window.electronAPI.readBinaryFile({ path: remotePath });
+
+    return {
+      id: buildTabId(connectionId, remotePath),
+      connectionId,
+      path: file.path,
+      name: remotePath.split('/').pop() || remotePath,
+      content: '',
+      savedContent: '',
+      isSaving: false,
+      autosaveRevision: 0,
+      kind: 'image',
+      imageDataUrl: buildImageDataUrl(file.path, file.base64),
+      byteLength: file.byteLength,
+      modifiedAt: file.modifiedAt,
+    };
+  }
+
+  async function reloadImageTab(tabId: string): Promise<void> {
+    const tab = tabs.find((item) => item.id === tabId);
+    if (!tab || tab.kind !== 'image' || tab.connectionId !== currentConnectionId) {
+      return;
+    }
+
+    setReloadingImagePath(tab.path);
+    try {
+      const file = await window.electronAPI.readBinaryFile({ path: tab.path });
+      const nextDataUrl = buildImageDataUrl(file.path, file.base64);
+
+      setTabs((previous) =>
+        previous.map((item) =>
+          item.id === tabId
+            ? {
+                ...item,
+                imageDataUrl: nextDataUrl,
+                byteLength: file.byteLength,
+                modifiedAt: file.modifiedAt,
+              }
+            : item,
+        ),
+      );
+    } catch (error) {
+      setStatusMessage(getErrorMessage(error, `Unable to reload ${tab.path}`));
+    } finally {
+      setReloadingImagePath(null);
+    }
+  }
+
   async function openFile(remotePath: string, revealTarget?: { line: number; column: number }): Promise<void> {
     setSelectedTreePath(remotePath);
     if (!currentConnectionId) {
@@ -1092,17 +1273,9 @@ export function App() {
     setStatusMessage(`Opening ${remotePath}`);
 
     try {
-      const file = await window.electronAPI.readFile(remotePath);
-      const nextTab: EditorTabItem = {
-        id: buildTabId(currentConnectionId, remotePath),
-        connectionId: currentConnectionId,
-        path: file.path,
-        name: remotePath.split('/').pop() || remotePath,
-        content: file.content,
-        savedContent: file.content,
-        isSaving: false,
-        autosaveRevision: 0,
-      };
+      const nextTab = isImagePath(remotePath)
+        ? await buildImageTab(currentConnectionId, remotePath)
+        : await buildTextTab(currentConnectionId, remotePath);
 
       setTabs((previous) => [...previous, nextTab]);
       setActiveTabId(nextTab.id);
@@ -1926,7 +2099,10 @@ export function App() {
     },
   );
   const handleTreeContextMenuAction = useStableCallback(
-    (action: 'upload' | 'download' | 'rename' | 'delete' | 'create-file' | 'create-folder', path: string) => {
+    (
+      action: 'upload' | 'download' | 'idle-download' | 'rename' | 'delete' | 'create-file' | 'create-folder',
+      path: string,
+    ) => {
       setTreeContextMenu(null);
       const entry =
         path === workspacePath
@@ -1952,6 +2128,23 @@ export function App() {
 
       if (action === 'download') {
         void downloadEntry(entry);
+        return;
+      }
+
+      if (action === 'idle-download') {
+        setStatusMessage(`Choosing destination for idle download of ${entry.path}`);
+        void window.electronAPI
+          .queueIdleDownload({ remotePath: entry.path })
+          .then((snapshot) => {
+            if (snapshot) {
+              setStatusMessage(
+                `Idle download queued (${snapshot.queuedItems} item${snapshot.queuedItems === 1 ? '' : 's'} waiting)`,
+              );
+            }
+          })
+          .catch((error) => {
+            setStatusMessage(getErrorMessage(error, `Unable to queue ${entry.path}`));
+          });
         return;
       }
 
@@ -2133,6 +2326,7 @@ export function App() {
         </div>
 
         <div className="status-cluster">
+          {isConnected ? <HostMetricsBar snapshot={hostMetrics} error={hostMetricsError} /> : null}
           <span className={`state-badge state-${connectionStatus.state}`}>{connectionStatus.state}</span>
           {connectionDiagnosticLabel ? <span className="status-diagnostic">{connectionDiagnosticLabel}</span> : null}
           <span className="status-text">{statusMessage}</span>
@@ -2322,7 +2516,20 @@ export function App() {
                 />
 
                 <div className="editor-surface">
-                  {activeTab ? (
+                  {activeTab?.kind === 'image' && activeTab.imageDataUrl ? (
+                    <ImagePreview
+                      path={activeTab.path}
+                      dataUrl={activeTab.imageDataUrl}
+                      byteLength={activeTab.byteLength ?? 0}
+                      modifiedAt={activeTab.modifiedAt}
+                      isReloading={reloadingImagePath === activeTab.path}
+                      autoRefresh={imageAutoRefresh}
+                      onToggleAutoRefresh={setImageAutoRefresh}
+                      onReload={() => {
+                        void reloadImageTab(activeTab.id);
+                      }}
+                    />
+                  ) : activeTab ? (
                     <Suspense fallback={<EditorLoading spinning={isLoadingFile} />}>
                       <RemoteEditor
                         isLoadingFile={isLoadingFile}
@@ -2372,8 +2579,41 @@ export function App() {
             <span>
               {getFileOperationLabel(latestFileOperation.kind)} {latestFileOperation.completedItems}/{latestFileOperation.totalItems}
             </span>
-            <span>{latestFileOperation.error ?? latestFileOperation.message}</span>
-            {latestFileOperation.retryable ? (
+            {latestFileOperation.status === 'running' &&
+            typeof latestFileOperation.totalBytes === 'number' &&
+            latestFileOperation.totalBytes > 0 ? (
+              (() => {
+                const transferred = latestFileOperation.transferredBytes ?? 0;
+                const total = latestFileOperation.totalBytes;
+                const pct = Math.min(100, Math.floor((transferred / total) * 100));
+                const rate = formatRate(latestFileOperation.bytesPerSecond);
+                const eta = formatEta(latestFileOperation.etaSeconds);
+                return (
+                  <div className="statusbar-transfer">
+                    <progress className="statusbar-transfer-bar" max={total} value={transferred} />
+                    <span className="statusbar-transfer-detail">
+                      {pct}% · {formatBytes(transferred)}/{formatBytes(total)}
+                      {rate ? ` · ${rate}` : ''}
+                      {eta ? ` · ETA ${eta}` : ''}
+                    </span>
+                  </div>
+                );
+              })()
+            ) : (
+              <span>{latestFileOperation.error ?? latestFileOperation.message}</span>
+            )}
+            {latestFileOperation.status === 'running' ? (
+              <button
+                type="button"
+                className="status-inline-button"
+                onClick={() => {
+                  void window.electronAPI.cancelFileOperation(latestFileOperation.operationId);
+                }}
+              >
+                Cancel
+              </button>
+            ) : null}
+            {latestFileOperation.retryable && latestFileOperation.status !== 'running' ? (
               <button
                 type="button"
                 className="status-inline-button"
@@ -2582,6 +2822,17 @@ export function App() {
             </button>
           )}
 
+          <button
+            type="button"
+            className="tree-context-menu-item"
+            onClick={() => {
+              handleTreeContextMenuAction('idle-download', treeContextMenu.path);
+            }}
+            title="Downloads only while the SSH connection is otherwise idle"
+          >
+            <Download size={14} />
+            <span>Idle Download…</span>
+          </button>
           <button
             type="button"
             className="tree-context-menu-item"

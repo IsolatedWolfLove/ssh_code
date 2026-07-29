@@ -122,8 +122,9 @@ export interface DeleteRemoteEntryInput {
 }
 
 export type FileOperationKind = 'upload' | 'download' | 'delete';
-export type FileOperationStatus = 'running' | 'completed' | 'failed';
+export type FileOperationStatus = 'running' | 'completed' | 'failed' | 'canceled';
 export type FileConflictStrategy = 'ask' | 'overwrite' | 'skip';
+export type FileTransferTransport = 'sftp' | 'rsync' | 'shell';
 
 export interface FileConflictItem {
   path: string;
@@ -143,6 +144,23 @@ export interface FileOperationEvent {
   currentPath?: string;
   error?: string;
   retryable?: boolean;
+  /** Bytes transferred so far across the whole operation, when known. */
+  transferredBytes?: number;
+  /** Total bytes the operation expects to move, when known. */
+  totalBytes?: number;
+  /** Recent throughput in bytes per second, when measurable. */
+  bytesPerSecond?: number;
+  /** Estimated seconds remaining at the current rate, when measurable. */
+  etaSeconds?: number;
+  /** Which mechanism moved the bytes. */
+  transport?: FileTransferTransport;
+}
+
+export interface TransferCapabilities {
+  /** A usable rsync binary exists on this machine. */
+  localRsync: boolean;
+  /** rsync is installed on the connected remote host. */
+  remoteRsync: boolean;
 }
 
 export interface UploadLocalEntriesInput {
@@ -189,8 +207,107 @@ export interface SearchRemoteFilesResult {
   truncated: boolean;
 }
 
+export type PersistentShellKind = 'tmux' | 'screen' | 'none';
+
+export interface RemoteShellSessionSummary {
+  name: string;
+  attached: boolean;
+  windows?: number;
+  createdAt?: number;
+}
+
+export interface RemoteShellSupport {
+  kind: PersistentShellKind;
+  sessions: RemoteShellSessionSummary[];
+}
+
+export interface CreateTerminalInput {
+  /**
+   * Run the shell inside a persistent multiplexer session with this name,
+   * attaching to it when it already exists. Ignored when the remote host has no
+   * multiplexer available.
+   */
+  sessionName?: string;
+  workspacePath?: string;
+}
+
 export interface CreateTerminalResult {
   terminalId: string;
+  /** Set when the shell runs inside a persistent multiplexer session. */
+  sessionName?: string;
+  persistentKind?: PersistentShellKind;
+}
+
+export interface HostGpuProcess {
+  pid: number;
+  memoryUsedMb?: number;
+  name?: string;
+}
+
+export interface HostGpuSnapshot {
+  index: number;
+  name: string;
+  utilization?: number;
+  memoryUsedMb?: number;
+  memoryTotalMb?: number;
+  temperature?: number;
+  powerDrawWatts?: number;
+  powerLimitWatts?: number;
+  processes: HostGpuProcess[];
+}
+
+export interface HostDiskUsage {
+  mountPath: string;
+  totalMb: number;
+  availableMb: number;
+}
+
+export interface HostMetricsSnapshot {
+  collectedAt: number;
+  gpus: HostGpuSnapshot[];
+  /** False on hosts without nvidia-smi, so the UI can hide the GPU section. */
+  gpuAvailable: boolean;
+  loadAverage?: [number, number, number];
+  cpuCount?: number;
+  memory?: {
+    totalMb: number;
+    availableMb: number;
+  };
+  disk?: HostDiskUsage;
+}
+
+export interface HostMetricsEvent {
+  connectionId: string;
+  snapshot?: HostMetricsSnapshot;
+  error?: string;
+}
+
+export interface ReadRemoteBinaryFileInput {
+  path: string;
+  /** Reject files larger than this instead of streaming them into the renderer. */
+  maxBytes?: number;
+}
+
+export interface RemoteBinaryFilePayload {
+  path: string;
+  /** Base64 so the payload survives the structured-clone IPC boundary intact. */
+  base64: string;
+  byteLength: number;
+  modifiedAt?: number;
+}
+
+export interface IdleTransferSnapshot {
+  queuedItems: number;
+  activePath?: string;
+  cachedBytes: number;
+  /** Automatic preview cache is hard-capped at 3 GiB. */
+  cacheLimitBytes: number;
+}
+
+export interface QueueIdleDownloadInput {
+  remotePath: string;
+  /** Full local destination. When omitted, the main process opens a folder picker. */
+  localPath?: string;
 }
 
 export interface EnsureVirtualDisplayResult {
@@ -389,12 +506,24 @@ export const IPC_CHANNELS = {
   deleteEntry: 'sftp:deleteEntry',
   uploadLocalEntries: 'sftp:uploadLocalEntries',
   downloadEntry: 'sftp:downloadEntry',
+  cancelFileOperation: 'sftp:cancelFileOperation',
+  getTransferCapabilities: 'sftp:getTransferCapabilities',
   pickDownloadDirectory: 'dialog:pickDownloadDirectory',
   searchInFiles: 'ssh:searchInFiles',
   pickPrivateKeyPath: 'dialog:pickPrivateKeyPath',
   pickKnownHostsPath: 'dialog:pickKnownHostsPath',
   pickUploadEntries: 'dialog:pickUploadEntries',
+  readBinaryFile: 'sftp:readBinaryFile',
+  startAutomaticMediaCache: 'sftp:startAutomaticMediaCache',
+  queueIdleDownload: 'sftp:queueIdleDownload',
+  idleTransferSnapshot: 'sftp:idleTransferSnapshot',
   terminalCreate: 'terminal:create',
+  terminalShellSupport: 'terminal:shellSupport',
+  terminalKillSession: 'terminal:killSession',
+  hostMetricsStart: 'hostMetrics:start',
+  hostMetricsStop: 'hostMetrics:stop',
+  hostMetricsRefresh: 'hostMetrics:refresh',
+  hostMetricsEvent: 'hostMetrics:event',
   terminalWrite: 'terminal:write',
   terminalResize: 'terminal:resize',
   terminalClose: 'terminal:close',

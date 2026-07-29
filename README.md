@@ -12,11 +12,15 @@ SSH Studio is a desktop SSH workspace for working on remote machines without bou
 - Save recent connections with editable names and remembered remote workspaces.
 - Browse remote folders over SFTP, then open any folder as the active workspace.
 - Create, rename, delete, upload, and download remote files or folders.
+- Transfer large files with a live progress bar (percent, throughput, ETA), a cancel button, and automatic byte-level resume: an interrupted upload or download picks up from where it stopped instead of restarting, using a temporary `.part` file that is swapped into place only once complete.
 - Edit remote files in Monaco with tabs, language detection, dirty-state markers, manual save, and autosave.
 - Use remote TypeScript/JavaScript completion, hover, diagnostics, and go-to-definition when a language server is installed in the workspace or remote PATH.
 - Save files through a temporary-file write plus remote rename/fallback replacement path.
 - Search the workspace with remote `rg` when available, then fall back to SFTP scanning.
 - Run multiple xterm.js terminals, including tabs and split terminal views.
+- Keep long jobs alive across disconnects by running terminals inside remote tmux (or screen) sessions, and re-attach to sessions that are still running.
+- Watch remote host resources in the status bar: per-GPU utilization, memory, temperature and power, which processes own each GPU, plus load average, RAM and free space on the workspace filesystem.
+- Preview remote images (result plots, sample frames) in a zoomable tab, with optional auto refresh to follow output as a job writes it.
 - Keep terminal working directories aligned with the current workspace.
 - Store quick commands locally and launch them in a fresh workspace terminal.
 - Manage local, remote, and dynamic SSH tunnels from saved connections.
@@ -35,6 +39,8 @@ SSH Studio is a desktop SSH workspace for working on remote machines without bou
 - A remote host reachable by SSH/SFTP.
 - Optional local `tailscale` CLI for Tailscale host discovery.
 - Optional remote `rg` for faster workspace search.
+- Optional remote `tmux` (or `screen`) so terminals survive a dropped connection.
+- Optional remote `nvidia-smi` for GPU metrics; CPU, memory and disk are read from `/proc` and `df`.
 - Optional remote `typescript-language-server` and `typescript` for TypeScript/JavaScript language intelligence.
 - Optional remote `Xvfb` and `ffmpeg` with X11 capture support for Vision Mode.
 - Go 1.20+ for building all remote server platform assets.

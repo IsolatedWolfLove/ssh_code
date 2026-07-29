@@ -3,7 +3,7 @@ import { createReadStream, createWriteStream, promises as fs } from 'node:fs';
 import { lstat as fsLstat } from 'node:fs/promises';
 import net, { type AddressInfo, type Server as NetServer, type Socket as NetSocket } from 'node:net';
 import path from 'node:path';
-import { PassThrough, Readable } from 'node:stream';
+import { PassThrough, Readable, Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 
 import ssh2 from 'ssh2';
@@ -17,8 +17,15 @@ import type {
 } from 'ssh2';
 
 import type {
+  CreateTerminalInput,
   CreateTerminalResult,
   CreateRemoteEntryInput,
+  HostMetricsEvent,
+  HostMetricsSnapshot,
+  PersistentShellKind,
+  ReadRemoteBinaryFileInput,
+  RemoteBinaryFilePayload,
+  RemoteShellSupport,
   DeleteRemoteEntryInput,
   ConnectInput,
   ConnectResult,
@@ -60,7 +67,21 @@ import type {
     VideoStreamStateEvent,
     EnableVisionModeResult,
   } from '../shared/contracts';
+import { buildMetricsCommand, parseMetricsOutput } from './host-metrics';
+import { IdleTransferManager } from './idle-transfer';
 import { RemoteLanguageServerManager } from './language-server-manager';
+import {
+  buildAttachCommand,
+  buildKillSessionCommand,
+  buildListSessionsCommand,
+  buildSetSessionEnvCommand,
+  buildSupportProbeCommand,
+  normalizeSessionName,
+  parseSessionList,
+  parseSupportProbe,
+} from './persistent-shell';
+import { quoteForShell } from './shell';
+import { PART_SUFFIX, RateEstimator, resolveResumeOffset, toPartPath } from './transfer';
 
 const DIRECTORY_MASK = 0o040000;
 const TYPE_MASK = 0o170000;
@@ -75,6 +96,15 @@ const VISION_DISPLAY_CHECK_TIMEOUT_MS = 8000;
 // avoids picking up a ffmpeg from an active conda/venv environment that was built
 // without x11grab support (common with conda-forge's ffmpeg package).
 const FFMPEG_CANDIDATE_PATHS = ['/usr/bin/ffmpeg', '/usr/local/bin/ffmpeg', '/bin/ffmpeg'];
+const HOST_METRICS_DEFAULT_INTERVAL_MS = 4000;
+const HOST_METRICS_MIN_INTERVAL_MS = 1000;
+// Previews are decoded in-memory in the renderer, so cap what a single request
+// can pull over SFTP. Result plots and sample images are far below this.
+const BINARY_FILE_DEFAULT_MAX_BYTES = 24 * 1024 * 1024;
+// Byte-progress events would otherwise fire on every chunk (thousands per second
+// on a fast link). Throttle IPC to a rate the UI can actually paint; the final
+// state for each file is always emitted regardless.
+const TRANSFER_PROGRESS_THROTTLE_MS = 250;
 const { Client, utils } = ssh2;
 
 type ConnectionListener = (payload: ConnectionStatePayload) => void;
@@ -85,6 +115,15 @@ type VideoFrameListener = (payload: VideoFrameEvent) => void;
 type VideoStreamStateListener = (payload: VideoStreamStateEvent) => void;
 type LanguageServerDiagnosticsListener = (payload: LanguageServerDiagnosticsEvent) => void;
 type LanguageServerStateListener = (payload: LanguageServerStateEvent) => void;
+type HostMetricsListener = (payload: HostMetricsEvent) => void;
+
+interface HostMetricsPoller {
+  timer: ReturnType<typeof setTimeout> | null;
+  intervalMs: number;
+  workspacePath: string;
+  inFlight: boolean;
+  stopped: boolean;
+}
 
 interface ActiveVideoStreamSession {
   channel: ClientChannel;
@@ -116,6 +155,9 @@ interface ConnectionManagerState {
 interface TerminalSession {
   client: SshClient;
   channel: ClientChannel;
+  /** Set when this shell is attached to a tmux/screen session on the host. */
+  sessionName?: string;
+  persistentKind?: PersistentShellKind;
 }
 
 interface FileOperationProgress {
@@ -126,11 +168,25 @@ interface FileOperationProgress {
   totalItems: number;
   completedItems: number;
   skippedItems: number;
+  totalBytes: number;
+  transferredBytes: number;
+  transport: FileOperationEvent['transport'];
+  rate: RateEstimator;
+  lastEmitAt: number;
+  canceled: boolean;
 }
 
 interface LocalPathSummary {
   files: number;
   directories: number;
+  bytes: number;
+}
+
+// Tracks the live streams behind an in-flight upload/download so a cancel
+// request can tear them down mid-file. The `.part` file is intentionally left on
+// disk so the next attempt resumes from where this one stopped.
+interface ActiveTransfer {
+  cancel(): void;
 }
 
 interface TransferSftpHandle {
@@ -178,6 +234,29 @@ type RemoteTunnelReject = () => void;
 
 function isDirectory(mode?: number): boolean {
   return typeof mode === 'number' && (mode & TYPE_MASK) === DIRECTORY_MASK;
+}
+
+// Thrown when a transfer is torn down by an explicit cancel request, so the
+// caller can report `canceled` instead of `failed` and keep the `.part` file.
+class TransferCanceledError extends Error {
+  constructor() {
+    super('Transfer canceled');
+    this.name = 'TransferCanceledError';
+  }
+}
+
+/**
+ * A passthrough that reports how many bytes flowed through it. Placing this in
+ * the transfer pipeline is what turns whole-file streaming into byte-granular
+ * progress without buffering the payload.
+ */
+function createByteCounter(onBytes: (chunk: number) => void): Transform {
+  return new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      onBytes(chunk.length);
+      callback(null, chunk);
+    },
+  });
 }
 
 function getErrorMessage(error: unknown, fallback: string): string {
@@ -356,17 +435,26 @@ async function verifyKnownHosts(
   return false;
 }
 
+function formatByteSize(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let value = bytes / 1024;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  return `${value >= 10 ? Math.round(value) : value.toFixed(1)} ${units[unitIndex]}`;
+}
+
 function buildSearchPreview(lineText: string, startIndex: number, matchLength: number): string {
   const previewStart = Math.max(0, startIndex - 48);
   const previewEnd = Math.min(lineText.length, startIndex + matchLength + 48);
   return lineText.slice(previewStart, previewEnd).trim();
-}
-
-function quoteForShell(value: string): string {
-  if (typeof value !== 'string') {
-    throw new Error('Invalid shell path');
-  }
-  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 function createSearchFallbackError(message: string): Error & { code: 'SEARCH_FALLBACK' } {
@@ -436,6 +524,23 @@ export class SshSessionManager {
   private visionModeDisplay: string | null = null;
   private resolvedFfmpegPath: string | null = null;
   private languageServers = new RemoteLanguageServerManager();
+  private hostMetricsListeners = new Set<HostMetricsListener>();
+  private hostMetricsPoller: HostMetricsPoller | null = null;
+  private persistentShellKind: PersistentShellKind | null = null;
+  private activeTransfers = new Map<string, ActiveTransfer>();
+  private remoteRsyncAvailable: boolean | null = null;
+  private idleTransfers = new IdleTransferManager({
+    stat: async (remotePath) => {
+      const stats = await this.statPath(remotePath, this.requireSftp());
+      return {
+        kind: isDirectory(stats.mode) ? 'directory' : 'file',
+        size: typeof stats.size === 'number' ? stats.size : 0,
+        modifiedAt: typeof stats.mtime === 'number' ? stats.mtime * 1000 : undefined,
+      };
+    },
+    readDir: (remotePath) => this.readDirWithSftp(remotePath, this.requireSftp()),
+    createReadStream: (remotePath) => this.requireSftp().createReadStream(remotePath),
+  });
 
   onConnectionState(listener: ConnectionListener): () => void {
     this.connectionListeners.add(listener);
@@ -477,6 +582,13 @@ export class SshSessionManager {
     this.videoStreamStateListeners.add(listener);
     return () => {
       this.videoStreamStateListeners.delete(listener);
+    };
+  }
+
+  onHostMetricsEvent(listener: HostMetricsListener): () => void {
+    this.hostMetricsListeners.add(listener);
+    return () => {
+      this.hostMetricsListeners.delete(listener);
     };
   }
 
@@ -533,6 +645,7 @@ export class SshSessionManager {
       this.connectionId = randomUUID();
       this.homeDir = null;
       this.directoryCache.clear();
+      await this.idleTransfers.startSession();
       this.filesystemInitPromise = this.initializePrimaryFilesystem(input.host, input.username);
 
       this.emitConnectionState({
@@ -571,6 +684,7 @@ export class SshSessionManager {
       this.connectionId = null;
       this.homeDir = null;
       this.directoryCache.clear();
+      await this.idleTransfers.stopSession();
       const diagnostic = classifyConnectionError(error);
       this.emitConnectionState({
         state: 'error',
@@ -590,6 +704,9 @@ export class SshSessionManager {
   async disconnect(): Promise<void> {
     this.isClosing = true;
 
+    this.stopHostMetrics();
+    await this.idleTransfers.stopSession();
+    this.persistentShellKind = null;
     await this.languageServers.stopAll();
     await this.stopAllTunnels();
 
@@ -664,21 +781,37 @@ export class SshSessionManager {
   }
 
   async readDir(remotePath: string): Promise<RemoteDirectoryEntry[]> {
-    const cached = this.directoryCache.get(remotePath);
-    if (cached && cached.expiresAt > Date.now()) {
-      return cached.entries;
-    }
+    return this.withForegroundActivity(async () => {
+      const cached = this.directoryCache.get(remotePath);
+      if (cached && cached.expiresAt > Date.now()) {
+        return cached.entries;
+      }
 
-    const nextEntries = this.sftp
-      ? await this.readDirWithSftp(remotePath, this.sftp)
-      : await this.readDirWithShell(remotePath);
+      const nextEntries = this.sftp
+        ? await this.readDirWithSftp(remotePath, this.sftp)
+        : await this.readDirWithShell(remotePath);
 
-    this.directoryCache.set(remotePath, {
-      entries: nextEntries,
-      expiresAt: Date.now() + READDIR_CACHE_TTL_MS,
+      this.directoryCache.set(remotePath, {
+        entries: nextEntries,
+        expiresAt: Date.now() + READDIR_CACHE_TTL_MS,
+      });
+
+      return nextEntries;
     });
+  }
 
-    return nextEntries;
+  startAutomaticMediaCache(remoteDirectory: string): void {
+    this.requireSftp();
+    this.idleTransfers.startAutomaticMediaCache(remoteDirectory);
+  }
+
+  queueIdleDownload(remotePath: string, localPath: string) {
+    this.requireSftp();
+    return this.idleTransfers.queueManualDownload(remotePath, localPath);
+  }
+
+  getIdleTransferSnapshot() {
+    return this.idleTransfers.snapshot();
   }
 
   startLanguageServer(input: StartLanguageServerInput): Promise<StartLanguageServerResult> {
@@ -710,38 +843,45 @@ export class SshSessionManager {
   }
 
   async readFile(remotePath: string): Promise<RemoteFilePayload> {
-    if (!this.sftp) {
-      const { stdout, stderr, exitCode } = await this.execRemoteCommand(`cat ${quoteForShell(remotePath)}`);
-      if (exitCode !== 0) {
-        throw new Error(stderr.trim() || `Unable to read ${remotePath}`);
+    const releaseForeground = this.idleTransfers.governor.beginForeground();
+    try {
+      if (!this.sftp) {
+        const { stdout, stderr, exitCode } = await this.execRemoteCommand(`cat ${quoteForShell(remotePath)}`);
+        if (exitCode !== 0) {
+          throw new Error(stderr.trim() || `Unable to read ${remotePath}`);
+        }
+
+        return {
+          path: remotePath,
+          content: stdout,
+        };
       }
+
+      const sftp = this.requireSftp();
+
+      const content = await new Promise<string>((resolve, reject) => {
+        const stream = sftp.createReadStream(remotePath, { encoding: 'utf8' });
+        let buffer = '';
+
+        stream.on('data', (chunk: string) => {
+          buffer += chunk;
+        });
+        stream.on('error', reject);
+        stream.on('end', () => resolve(buffer));
+      });
 
       return {
         path: remotePath,
-        content: stdout,
+        content,
       };
+    } finally {
+      releaseForeground();
     }
-
-    const sftp = this.requireSftp();
-
-    const content = await new Promise<string>((resolve, reject) => {
-      const stream = sftp.createReadStream(remotePath, { encoding: 'utf8' });
-      let buffer = '';
-
-      stream.on('data', (chunk: string) => {
-        buffer += chunk;
-      });
-      stream.on('error', reject);
-      stream.on('end', () => resolve(buffer));
-    });
-
-    return {
-      path: remotePath,
-      content,
-    };
   }
 
   async writeFileAtomic(input: SaveRemoteFileInput): Promise<SaveRemoteFileResult> {
+    const releaseForeground = this.idleTransfers.governor.beginForeground();
+    try {
     const temporaryPath = this.buildTemporaryPath(input.path);
 
     try {
@@ -777,6 +917,9 @@ export class SshSessionManager {
         // ponytail: temp-file cleanup is best-effort after the write already failed.
       });
       throw new Error(getErrorMessage(error, `Unable to save ${input.path}`));
+    }
+    } finally {
+      releaseForeground();
     }
   }
 
@@ -893,7 +1036,10 @@ export class SshSessionManager {
       input.localPaths[0] ?? input.remotePath,
       input.remotePath,
       await this.countLocalItems(input.localPaths),
+      await this.countLocalBytes(input.localPaths),
+      sftp ? 'sftp' : 'shell',
     );
+    this.registerOperationCancel(progress);
 
     this.emitFileOperationState(progress, 'running', `Uploading into ${input.remotePath}`);
     try {
@@ -914,11 +1060,23 @@ export class SshSessionManager {
         skippedItems: progress.skippedItems,
       };
     } catch (error) {
+      if (error instanceof TransferCanceledError || progress.canceled) {
+        this.emitFileOperationState(progress, 'canceled', `Upload canceled for ${input.remotePath}`, {
+          error: 'Canceled. Partial data is kept so the transfer can resume.',
+          retryable: true,
+        });
+        return {
+          status: 'completed',
+          skippedItems: progress.skippedItems,
+        };
+      }
       this.emitFileOperationState(progress, 'failed', `Upload failed for ${input.remotePath}`, {
         error: getErrorMessage(error, `Unable to upload into ${input.remotePath}`),
         retryable: true,
       });
       throw error;
+    } finally {
+      this.activeTransfers.delete(input.operationId);
     }
   }
 
@@ -939,7 +1097,12 @@ export class SshSessionManager {
       transfer.sftp
         ? await this.countRemoteItems(input.remotePath, transfer.sftp)
         : await this.countRemoteItemsWithShell(input.remotePath),
+      transfer.sftp
+        ? await this.countRemoteBytes(input.remotePath, transfer.sftp)
+        : await this.countRemoteBytesWithShell(input.remotePath),
+      transfer.sftp ? 'sftp' : 'shell',
     );
+    this.registerOperationCancel(progress);
 
     this.emitFileOperationState(progress, 'running', `Downloading ${input.remotePath}`);
     try {
@@ -986,11 +1149,23 @@ export class SshSessionManager {
         skippedItems: progress.skippedItems,
       };
     } catch (error) {
+      if (error instanceof TransferCanceledError || progress.canceled) {
+        this.emitFileOperationState(progress, 'canceled', `Download canceled for ${input.remotePath}`, {
+          error: 'Canceled. Partial data is kept so the transfer can resume.',
+          retryable: true,
+        });
+        return {
+          status: 'completed',
+          skippedItems: progress.skippedItems,
+        };
+      }
       this.emitFileOperationState(progress, 'failed', `Download failed for ${input.remotePath}`, {
         error: getErrorMessage(error, `Unable to download ${input.remotePath}`),
         retryable: true,
       });
       throw error;
+    } finally {
+      this.activeTransfers.delete(input.operationId);
     }
   }
 
@@ -1082,7 +1257,47 @@ export class SshSessionManager {
     };
   }
 
-  async createTerminal(): Promise<CreateTerminalResult> {
+  /**
+   * Detects whether the remote host can host persistent shell sessions, and
+   * lists the ones that already exist. The multiplexer kind is probed once per
+   * connection; the session list is always read live because sessions come and
+   * go outside this app.
+   */
+  async getRemoteShellSupport(): Promise<RemoteShellSupport> {
+    const kind = await this.resolvePersistentShellKind();
+    const listCommand = buildListSessionsCommand(kind);
+    if (!listCommand) {
+      return { kind, sessions: [] };
+    }
+
+    const { stdout } = await this.execRemoteCommand(listCommand);
+    return { kind, sessions: parseSessionList(kind, stdout) };
+  }
+
+  async killRemoteShellSession(sessionName: string): Promise<void> {
+    const kind = await this.resolvePersistentShellKind();
+    if (kind === 'none') {
+      throw new Error('No persistent shell multiplexer is available on the remote host');
+    }
+
+    const { stderr, exitCode } = await this.execRemoteCommand(buildKillSessionCommand(kind, sessionName));
+    if (exitCode !== 0) {
+      throw new Error(stderr.trim() || `Unable to end session ${sessionName}`);
+    }
+  }
+
+  private async resolvePersistentShellKind(): Promise<PersistentShellKind> {
+    if (this.persistentShellKind) {
+      return this.persistentShellKind;
+    }
+
+    const { stdout } = await this.execRemoteCommand(buildSupportProbeCommand());
+    const kind = parseSupportProbe(stdout);
+    this.persistentShellKind = kind;
+    return kind;
+  }
+
+  async createTerminal(input?: CreateTerminalInput): Promise<CreateTerminalResult> {
     if (!this.interactiveClient || !this.connectionId) {
       throw new Error('No active SSH connection');
     }
@@ -1091,6 +1306,14 @@ export class SshSessionManager {
     if (!config) {
       throw new Error('No active SSH connection');
     }
+
+    // Resolved before the extra client is opened so a probe failure does not
+    // leave an orphaned connection behind.
+    const requestedSessionName = input?.sessionName?.trim() ?? '';
+    const persistentKind =
+      requestedSessionName === ''
+        ? 'none'
+        : await this.resolvePersistentShellKind().catch(() => 'none' as PersistentShellKind);
 
     const terminalId = randomUUID();
     const client = await this.createConnectedClient(config);
@@ -1103,13 +1326,33 @@ export class SshSessionManager {
 
     let terminal: ClientChannel;
     try {
-      terminal = await this.createTerminalChannel(client);
+      terminal =
+        persistentKind === 'none'
+          ? await this.createTerminalChannel(client)
+          : await this.createTerminalChannel(
+              client,
+              buildAttachCommand({
+                kind: persistentKind,
+                sessionName: requestedSessionName,
+                workspacePath: input?.workspacePath,
+                // Passed through the attach command so a newly created session
+                // inherits it without typing anything into a running job.
+                env: this.visionModeDisplay ? { DISPLAY: this.visionModeDisplay } : undefined,
+              }),
+            );
     } catch (error) {
       this.closeTerminalClient(client);
       throw error;
     }
 
-    const session: TerminalSession = { client, channel: terminal };
+    const normalizedSessionName =
+      persistentKind === 'none' ? undefined : normalizeSessionName(requestedSessionName);
+    const session: TerminalSession = {
+      client,
+      channel: terminal,
+      sessionName: normalizedSessionName,
+      persistentKind: persistentKind === 'none' ? undefined : persistentKind,
+    };
 
     if (!this.interactiveClient || !this.connectionId || this.isClosing) {
       this.destroyTerminalSession(session);
@@ -1195,14 +1438,21 @@ export class SshSessionManager {
       });
     });
 
-    if (this.visionModeDisplay) {
-      await this.writeTerminal(terminalId, `export DISPLAY=${this.visionModeDisplay}\r`).catch(() => undefined);
+    if (persistentKind === 'none') {
+      if (this.visionModeDisplay) {
+        await this.writeTerminal(terminalId, `export DISPLAY=${this.visionModeDisplay}\r`).catch(() => undefined);
+      }
+
+      return { terminalId };
     }
 
-    return { terminalId };
+    // The normalized name is what actually reached tmux/screen, so the renderer
+    // must report and re-attach with that rather than the raw request.
+    return { terminalId, sessionName: normalizedSessionName, persistentKind };
   }
 
   async writeTerminal(terminalId: string, data: string): Promise<void> {
+    this.idleTransfers.governor.noteForegroundActivity();
     const terminal = this.requireTerminal(terminalId);
     terminal.write(data);
   }
@@ -1225,6 +1475,181 @@ export class SshSessionManager {
       type: 'exit',
       terminalId,
     });
+  }
+
+  /**
+   * Starts (or retunes) periodic host telemetry polling. Only one poller runs
+   * per session; calling this again just updates the interval and the
+   * filesystem whose free space is reported.
+   */
+  async startHostMetrics(workspacePath: string, intervalMs?: number): Promise<void> {
+    if (!this.interactiveClient || !this.connectionId) {
+      throw new Error('No active SSH connection');
+    }
+
+    const normalizedInterval = Math.max(
+      HOST_METRICS_MIN_INTERVAL_MS,
+      Math.round(intervalMs ?? HOST_METRICS_DEFAULT_INTERVAL_MS),
+    );
+
+    if (this.hostMetricsPoller) {
+      this.hostMetricsPoller.intervalMs = normalizedInterval;
+      this.hostMetricsPoller.workspacePath = workspacePath;
+      return;
+    }
+
+    const poller: HostMetricsPoller = {
+      timer: null,
+      intervalMs: normalizedInterval,
+      workspacePath,
+      inFlight: false,
+      stopped: false,
+    };
+    this.hostMetricsPoller = poller;
+    void this.runHostMetricsPoll(poller);
+  }
+
+  stopHostMetrics(): void {
+    const poller = this.hostMetricsPoller;
+    this.hostMetricsPoller = null;
+    if (!poller) {
+      return;
+    }
+
+    poller.stopped = true;
+    if (poller.timer) {
+      clearTimeout(poller.timer);
+      poller.timer = null;
+    }
+  }
+
+  async collectHostMetrics(workspacePath: string): Promise<HostMetricsSnapshot> {
+    const { stdout } = await this.execRemoteCommand(buildMetricsCommand(workspacePath));
+    return parseMetricsOutput(stdout);
+  }
+
+  /**
+   * Polls once, emits the result, then schedules the next run from the
+   * completion time rather than on a fixed interval. That keeps a slow or
+   * stalled host from queueing up overlapping `exec` channels.
+   */
+  private async runHostMetricsPoll(poller: HostMetricsPoller): Promise<void> {
+    if (poller.stopped || this.hostMetricsPoller !== poller) {
+      return;
+    }
+
+    const connectionId = this.connectionId;
+    if (!connectionId || !this.interactiveClient) {
+      this.scheduleHostMetricsPoll(poller);
+      return;
+    }
+
+    poller.inFlight = true;
+    try {
+      const snapshot = await this.collectHostMetrics(poller.workspacePath);
+      if (!poller.stopped && this.hostMetricsPoller === poller && this.connectionId === connectionId) {
+        this.emitHostMetricsEvent({ connectionId, snapshot });
+      }
+    } catch (error) {
+      if (!poller.stopped && this.hostMetricsPoller === poller && this.connectionId === connectionId) {
+        this.emitHostMetricsEvent({
+          connectionId,
+          error: getErrorMessage(error, 'Unable to collect host metrics'),
+        });
+      }
+    } finally {
+      poller.inFlight = false;
+      this.scheduleHostMetricsPoll(poller);
+    }
+  }
+
+  private scheduleHostMetricsPoll(poller: HostMetricsPoller): void {
+    if (poller.stopped || this.hostMetricsPoller !== poller) {
+      return;
+    }
+
+    poller.timer = setTimeout(() => {
+      poller.timer = null;
+      void this.runHostMetricsPoll(poller);
+    }, poller.intervalMs);
+  }
+
+  private emitHostMetricsEvent(event: HostMetricsEvent): void {
+    for (const listener of this.hostMetricsListeners) {
+      listener(event);
+    }
+  }
+
+  /**
+   * Reads a remote file as raw bytes for preview purposes (result plots, sample
+   * images), rather than the utf8 text path used by the editor. Size is checked
+   * before transfer so a stray multi-gigabyte file cannot be pulled by accident.
+   */
+  async readBinaryFile(input: ReadRemoteBinaryFileInput): Promise<RemoteBinaryFilePayload> {
+    const releaseForeground = this.idleTransfers.governor.beginForeground();
+    try {
+      const sftp = this.requireSftp();
+      const maxBytes = Math.max(1, Math.round(input.maxBytes ?? BINARY_FILE_DEFAULT_MAX_BYTES));
+
+      const stats = await new Promise<Stats>((resolve, reject) => {
+        sftp.stat(input.path, (error, result) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+
+          resolve(result);
+        });
+      });
+
+      const size = typeof stats.size === 'number' ? stats.size : 0;
+      if (size > maxBytes) {
+        throw new Error(
+          `${input.path} is ${formatByteSize(size)}, larger than the ${formatByteSize(maxBytes)} preview limit. Download it instead.`,
+        );
+      }
+
+      const modifiedAt = typeof stats.mtime === 'number' ? stats.mtime * 1000 : undefined;
+      const cached = await this.idleTransfers.readCached(input.path, size, modifiedAt);
+      if (cached) {
+        return {
+          path: input.path,
+          base64: cached.toString('base64'),
+          byteLength: cached.length,
+          modifiedAt,
+        };
+      }
+
+      const chunks: Buffer[] = [];
+      let received = 0;
+
+      await new Promise<void>((resolve, reject) => {
+        const stream = sftp.createReadStream(input.path);
+
+        stream.on('data', (chunk: Buffer) => {
+          received += chunk.length;
+          if (received > maxBytes) {
+            stream.destroy();
+            reject(new Error(`${input.path} exceeded the ${formatByteSize(maxBytes)} preview limit while reading`));
+            return;
+          }
+
+          chunks.push(chunk);
+        });
+        stream.on('error', reject);
+        stream.on('end', () => resolve());
+      });
+
+      const data = Buffer.concat(chunks);
+      return {
+        path: input.path,
+        base64: data.toString('base64'),
+        byteLength: data.length,
+        modifiedAt,
+      };
+    } finally {
+      releaseForeground();
+    }
   }
 
   /**
@@ -1276,7 +1701,24 @@ export class SshSessionManager {
     this.visionModeDisplay = resolvedDisplay;
 
     const exportLine = `export DISPLAY=${resolvedDisplay}\r`;
-    for (const terminalId of this.terminals.keys()) {
+    for (const [terminalId, session] of this.terminals) {
+      // A persistent session may be running a training job rather than sitting
+      // at a prompt, so typing an export would go into that program's stdin.
+      // tmux `setenv` applies to panes started afterwards instead; screen has no
+      // equivalent, so those sessions keep whatever DISPLAY they started with.
+      if (session.sessionName && session.persistentKind) {
+        const command = buildSetSessionEnvCommand(
+          session.persistentKind,
+          session.sessionName,
+          'DISPLAY',
+          resolvedDisplay,
+        );
+        if (command) {
+          await this.execRemoteCommand(command).catch(() => undefined);
+        }
+        continue;
+      }
+
       await this.writeTerminal(terminalId, exportLine).catch(() => undefined);
     }
 
@@ -1488,23 +1930,34 @@ export class SshSessionManager {
     this.setTunnelState(tunnelId, 'stopped', tunnel ? `Stopped tunnel ${tunnel.config.name}` : undefined);
   }
 
-  private async createTerminalChannel(client: SshClient): Promise<ClientChannel> {
-    return new Promise<ClientChannel>((resolve, reject) => {
-      client.shell(
-        {
-          term: 'xterm-256color',
-          cols: 120,
-          rows: 32,
-        },
-        (error: Error | undefined, stream: ClientChannel) => {
-          if (error) {
-            reject(error);
-            return;
-          }
+  /**
+   * Opens an interactive channel. Without `command` this is a plain login shell.
+   * With one, the command runs under a PTY instead, which is what a multiplexer
+   * attach needs (tmux refuses to run without a terminal).
+   */
+  private async createTerminalChannel(client: SshClient, command?: string): Promise<ClientChannel> {
+    const window = {
+      term: 'xterm-256color',
+      cols: 120,
+      rows: 32,
+    };
 
-          resolve(stream);
-        },
-      );
+    return new Promise<ClientChannel>((resolve, reject) => {
+      const handle = (error: Error | undefined, stream: ClientChannel) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        resolve(stream);
+      };
+
+      if (command === undefined) {
+        client.shell(window, handle);
+        return;
+      }
+
+      client.exec(command, { pty: window }, handle);
     });
   }
 
@@ -1928,6 +2381,9 @@ export class SshSessionManager {
   }
 
   private emitTerminalEvent(payload: TerminalEvent): void {
+    if (payload.type === 'data') {
+      this.idleTransfers.governor.noteForegroundActivity();
+    }
     for (const listener of this.terminalListeners) {
       listener(payload);
     }
@@ -1946,6 +2402,7 @@ export class SshSessionManager {
   }
 
   private emitVideoFrameEvent(payload: VideoFrameEvent): void {
+    this.idleTransfers.governor.noteForegroundActivity();
     for (const listener of this.videoFrameListeners) {
       listener(payload);
     }
@@ -1963,6 +2420,8 @@ export class SshSessionManager {
     sourcePath: string,
     targetPath: string,
     totalItems: number,
+    totalBytes = 0,
+    transport: FileOperationEvent['transport'] = 'sftp',
   ): FileOperationProgress {
     return {
       operationId,
@@ -1972,6 +2431,12 @@ export class SshSessionManager {
       totalItems: Math.max(totalItems, 1),
       completedItems: 0,
       skippedItems: 0,
+      totalBytes,
+      transferredBytes: 0,
+      transport,
+      rate: new RateEstimator(),
+      lastEmitAt: 0,
+      canceled: false,
     };
   }
 
@@ -1981,6 +2446,10 @@ export class SshSessionManager {
     message: string,
     extras?: Pick<FileOperationEvent, 'currentPath' | 'error' | 'retryable'>,
   ): void {
+    if (status === 'running') {
+      this.idleTransfers.governor.noteForegroundActivity();
+    }
+    const hasBytes = progress.totalBytes > 0;
     this.emitFileOperationEvent({
       operationId: progress.operationId,
       kind: progress.kind,
@@ -1994,7 +2463,46 @@ export class SshSessionManager {
       currentPath: extras?.currentPath,
       error: extras?.error,
       retryable: extras?.retryable,
+      transport: progress.transport,
+      transferredBytes: hasBytes ? progress.transferredBytes : undefined,
+      totalBytes: hasBytes ? progress.totalBytes : undefined,
+      bytesPerSecond: hasBytes ? progress.rate.bytesPerSecond() : undefined,
+      etaSeconds: hasBytes ? progress.rate.etaSeconds(progress.transferredBytes, progress.totalBytes) : undefined,
     });
+  }
+
+  /**
+   * Accumulates transferred bytes and emits a throttled `running` event. The
+   * estimator is fed on every call so the rate/ETA stay current, but the IPC
+   * message only goes out every TRANSFER_PROGRESS_THROTTLE_MS (or when forced,
+   * e.g. the final byte of a file).
+   */
+  private emitByteProgress(
+    progress: FileOperationProgress,
+    addedBytes: number,
+    currentPath: string,
+    force = false,
+  ): void {
+    progress.transferredBytes += addedBytes;
+    const now = Date.now();
+    progress.rate.record(progress.transferredBytes, now);
+    if (!force && now - progress.lastEmitAt < TRANSFER_PROGRESS_THROTTLE_MS) {
+      return;
+    }
+
+    progress.lastEmitAt = now;
+    this.emitFileOperationState(
+      progress,
+      'running',
+      `${progress.kind === 'download' ? 'Downloading' : 'Transferring'} ${currentPath}`,
+      { currentPath },
+    );
+  }
+
+  private throwIfCanceled(progress: FileOperationProgress): void {
+    if (progress.canceled) {
+      throw new TransferCanceledError();
+    }
   }
 
   private advanceFileOperation(
@@ -2024,6 +2532,15 @@ export class SshSessionManager {
     return this.interactiveClient;
   }
 
+  private async withForegroundActivity<T>(operation: () => Promise<T>): Promise<T> {
+    const release = this.idleTransfers.governor.beginForeground();
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
   private requireSftp(): SFTPWrapper {
     if (!this.sftp) {
       throw new Error('No active SFTP session');
@@ -2043,6 +2560,7 @@ export class SshSessionManager {
 
   private async execRemoteCommand(command: string): Promise<RemoteCommandResult> {
     const client = this.requireInteractiveClient();
+    this.idleTransfers.governor.noteForegroundActivity();
 
     return new Promise<RemoteCommandResult>((resolve, reject) => {
       client.exec(command, (error, stream) => {
@@ -2055,9 +2573,11 @@ export class SshSessionManager {
         let stderr = '';
 
         stream.on('data', (chunk: Buffer | string) => {
+          this.idleTransfers.governor.noteForegroundActivity();
           stdout += chunk.toString();
         });
         stream.stderr.on('data', (chunk: Buffer | string) => {
+          this.idleTransfers.governor.noteForegroundActivity();
           stderr += chunk.toString();
         });
         stream.on('error', reject);
@@ -2564,9 +3084,9 @@ export class SshSessionManager {
     });
   }
 
-  private createRemoteReadStream(remotePath: string, sftp?: SFTPWrapper) {
+  private createRemoteReadStream(remotePath: string, sftp?: SFTPWrapper, start = 0) {
     const targetSftp = sftp ?? this.requireSftp();
-    return targetSftp.createReadStream(remotePath);
+    return targetSftp.createReadStream(remotePath, start > 0 ? { start } : undefined);
   }
 
   private createRemoteReadStreamWithShell(remotePath: string) {
@@ -2608,9 +3128,14 @@ export class SshSessionManager {
     return output;
   }
 
-  private createRemoteWriteStream(remotePath: string, sftp?: SFTPWrapper) {
+  private createRemoteWriteStream(remotePath: string, sftp?: SFTPWrapper, start = 0) {
     const targetSftp = sftp ?? this.requireSftp();
-    return targetSftp.createWriteStream(remotePath, { mode: 0o644 });
+    // Resuming: open with r+ and seek to `start` so existing bytes are kept.
+    // Fresh: w truncates. ssh2's WriteStream honours both `flags` and `start`.
+    return targetSftp.createWriteStream(
+      remotePath,
+      start > 0 ? { mode: 0o644, flags: 'r+', start } : { mode: 0o644, flags: 'w' },
+    );
   }
 
   private async ensureRemoteDirectory(remotePath: string, sftp?: SFTPWrapper): Promise<void> {
@@ -2695,14 +3220,184 @@ export class SshSessionManager {
       }
     }
     await this.ensureRemoteDirectory(path.posix.dirname(remotePath), targetSftp ?? undefined);
-    if (targetSftp) {
-      await pipeline(createReadStream(localPath), this.createRemoteWriteStream(remotePath, targetSftp));
-    } else {
-      await this.writeRemoteStreamWithShell(remotePath, createReadStream(localPath));
+
+    if (progress) {
+      this.throwIfCanceled(progress);
     }
+
+    if (targetSftp) {
+      await this.uploadFileResumable(localPath, remotePath, targetSftp, progress);
+    } else {
+      // No SFTP handle (Tailscale/shell fallback): non-resumable cat write, but
+      // still report bytes as they stream so the progress bar moves.
+      const source = createReadStream(localPath);
+      const counter = createByteCounter((bytes) => {
+        if (progress) {
+          this.emitByteProgress(progress, bytes, remotePath, false);
+        }
+      });
+      await this.writeRemoteStreamWithShell(remotePath, source.pipe(counter));
+      if (progress) {
+        this.emitByteProgress(progress, 0, remotePath, true);
+      }
+    }
+
     if (progress) {
       this.advanceFileOperation(progress, remotePath);
     }
+  }
+
+  /**
+   * Uploads a single file into a sibling `.part` and renames it into place only
+   * once complete. If a `.part` from an earlier attempt exists and is shorter
+   * than the source, the transfer resumes from its end instead of restarting.
+   */
+  private async uploadFileResumable(
+    localPath: string,
+    remotePath: string,
+    sftp: SFTPWrapper,
+    progress?: FileOperationProgress,
+  ): Promise<void> {
+    const localStats = await fs.stat(localPath);
+    const sourceSize = localStats.size;
+    const partPath = toPartPath(remotePath);
+
+    let existingPartSize: number | undefined;
+    try {
+      existingPartSize = (await this.statPath(partPath, sftp)).size;
+    } catch {
+      existingPartSize = undefined;
+    }
+
+    const offset = resolveResumeOffset(existingPartSize, sourceSize);
+    if (progress && offset > 0) {
+      // Bytes already on the far side count as transferred so the bar and ETA
+      // reflect real remaining work rather than restarting at zero.
+      this.emitByteProgress(progress, offset, remotePath, true);
+    }
+
+    if (sourceSize === 0) {
+      // Nothing to stream; just materialise an empty file at the part path.
+      await new Promise<void>((resolve, reject) => {
+        const stream = this.createRemoteWriteStream(partPath, sftp, 0);
+        stream.on('error', reject);
+        stream.on('close', () => resolve());
+        stream.end();
+      });
+    } else {
+      const source = createReadStream(localPath, offset > 0 ? { start: offset } : undefined);
+      const counter = createByteCounter((bytes) => {
+        if (progress) {
+          this.emitByteProgress(progress, bytes, remotePath, false);
+        }
+      });
+      const sink = this.createRemoteWriteStream(partPath, sftp, offset);
+
+      const cancelDeferred = this.registerTransferStreams(progress, [source, counter, sink]);
+      try {
+        await pipeline(source, counter, sink);
+      } finally {
+        cancelDeferred();
+      }
+    }
+
+    if (progress) {
+      this.throwIfCanceled(progress);
+      this.emitByteProgress(progress, 0, remotePath, true);
+    }
+
+    // Replace any existing destination, then atomically swap the part into place.
+    await this.renameRemoteInto(partPath, remotePath, sftp);
+  }
+
+  private async renameRemoteInto(fromPath: string, toPath: string, sftp: SFTPWrapper): Promise<void> {
+    if (await this.remotePathExists(toPath, sftp)) {
+      await this.deleteRemotePath(toPath);
+    }
+    await new Promise<void>((resolve, reject) => {
+      sftp.rename(fromPath, toPath, (error: Error | null | undefined) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+  }
+
+  /**
+   * Registers an operation so `cancelFileOperation` can flag it even before (or
+   * between) individual file streams open. While a file is streaming,
+   * `registerTransferStreams` upgrades the entry to also tear those streams down.
+   */
+  private registerOperationCancel(progress: FileOperationProgress): void {
+    this.activeTransfers.set(progress.operationId, {
+      cancel: () => {
+        progress.canceled = true;
+      },
+    });
+  }
+
+  /**
+   * Wires the live streams of an in-flight transfer into the cancel registry so
+   * `cancelFileOperation` can destroy them mid-file. Returns a cleanup thunk that
+   * restores the operation-level canceler once this file settles.
+   */
+  private registerTransferStreams(
+    progress: FileOperationProgress | undefined,
+    streams: Array<{ destroy(error?: Error): void }>,
+  ): () => void {
+    if (!progress) {
+      return () => {};
+    }
+
+    const operationId = progress.operationId;
+    this.activeTransfers.set(operationId, {
+      cancel: () => {
+        progress.canceled = true;
+        for (const stream of streams) {
+          try {
+            stream.destroy(new TransferCanceledError());
+          } catch {
+            // best effort teardown
+          }
+        }
+      },
+    });
+
+    return () => {
+      // Only downgrade if we're still the active entry for this operation.
+      if (this.activeTransfers.has(operationId)) {
+        this.registerOperationCancel(progress);
+      }
+    };
+  }
+
+  /**
+   * Cancels an in-flight upload/download. The live streams are destroyed and the
+   * operation flagged; any `.part` file is left in place so the next attempt
+   * resumes from where this one stopped. Unknown ids are ignored.
+   */
+  cancelFileOperation(operationId: string): void {
+    this.activeTransfers.get(operationId)?.cancel();
+  }
+
+  /**
+   * Reports whether the connected remote host has a usable `rsync`, caching the
+   * result for the life of the connection. Used by the transfer-capabilities
+   * probe that gates the Phase 2 rsync delta fast-path.
+   */
+  async probeRemoteRsync(): Promise<boolean> {
+    if (this.remoteRsyncAvailable !== null) {
+      return this.remoteRsyncAvailable;
+    }
+    try {
+      const { exitCode } = await this.execRemoteCommand('command -v rsync >/dev/null 2>&1');
+      this.remoteRsyncAvailable = exitCode === 0;
+    } catch {
+      this.remoteRsyncAvailable = false;
+    }
+    return this.remoteRsyncAvailable;
   }
 
   private async uploadLocalDirectory(
@@ -2770,7 +3465,57 @@ export class SshSessionManager {
     }
 
     await fs.mkdir(path.dirname(localPath), { recursive: true });
-    await pipeline(this.createRemoteReadStream(remotePath, sftp), createWriteStream(localPath));
+
+    if (progress) {
+      this.throwIfCanceled(progress);
+    }
+
+    const remoteStats = await this.statPath(remotePath, sftp);
+    const sourceSize = typeof remoteStats.size === 'number' ? remoteStats.size : 0;
+    const partPath = toPartPath(localPath);
+
+    let existingPartSize: number | undefined;
+    try {
+      existingPartSize = (await fsLstat(partPath)).size;
+    } catch {
+      existingPartSize = undefined;
+    }
+
+    const offset = resolveResumeOffset(existingPartSize, sourceSize);
+    if (progress && offset > 0) {
+      this.emitByteProgress(progress, offset, localPath, true);
+    }
+
+    if (sourceSize === 0) {
+      // Materialise an empty local file without opening a remote read stream.
+      await fs.writeFile(partPath, '');
+    } else {
+      const source = this.createRemoteReadStream(remotePath, sftp, offset);
+      const counter = createByteCounter((bytes) => {
+        if (progress) {
+          this.emitByteProgress(progress, bytes, localPath, false);
+        }
+      });
+      // 'a' appends onto whatever the earlier attempt already fetched; 'w' starts clean.
+      const sink = createWriteStream(partPath, offset > 0 ? { flags: 'a' } : { flags: 'w' });
+
+      const cancelDeferred = this.registerTransferStreams(progress, [source, counter, sink]);
+      try {
+        await pipeline(source, counter, sink);
+      } finally {
+        cancelDeferred();
+      }
+    }
+
+    if (progress) {
+      this.throwIfCanceled(progress);
+      this.emitByteProgress(progress, 0, localPath, true);
+    }
+
+    // Swap the completed part into place, replacing any prior destination file.
+    await fs.rm(localPath, { force: true });
+    await fs.rename(partPath, localPath);
+
     if (progress) {
       this.advanceFileOperation(progress, localPath);
     }
@@ -2801,8 +3546,15 @@ export class SshSessionManager {
     }
 
     await fs.mkdir(path.dirname(localPath), { recursive: true });
-    await pipeline(this.createRemoteReadStreamWithShell(remotePath), createWriteStream(localPath));
+    const source = this.createRemoteReadStreamWithShell(remotePath);
+    const counter = createByteCounter((bytes) => {
+      if (progress) {
+        this.emitByteProgress(progress, bytes, localPath, false);
+      }
+    });
+    await pipeline(source, counter, createWriteStream(localPath));
     if (progress) {
+      this.emitByteProgress(progress, 0, localPath, true);
       this.advanceFileOperation(progress, localPath);
     }
   }
@@ -2885,7 +3637,10 @@ export class SshSessionManager {
     });
 
     return entries
-      .filter((entry: FileEntryWithStats) => entry.filename !== '.' && entry.filename !== '..')
+      .filter(
+        (entry: FileEntryWithStats) =>
+          entry.filename !== '.' && entry.filename !== '..' && !entry.filename.endsWith(PART_SUFFIX),
+      )
       .map((entry: FileEntryWithStats): RemoteDirectoryEntry => ({
         name: entry.filename,
         path: path.posix.join(remotePath, entry.filename),
@@ -2930,7 +3685,7 @@ export class SshSessionManager {
 
         const kind = line.slice(0, separatorIndex) === 'directory' ? 'directory' : 'file';
         const name = line.slice(separatorIndex + 1);
-        if (name === '' || name === '.' || name === '..') {
+        if (name === '' || name === '.' || name === '..' || name.endsWith(PART_SUFFIX)) {
           return null;
         }
 
@@ -2998,20 +3753,67 @@ export class SshSessionManager {
   private async summarizeLocalPath(localPath: string): Promise<LocalPathSummary> {
     const stats = await fs.stat(localPath);
     if (stats.isFile()) {
-      return { files: 1, directories: 0 };
+      return { files: 1, directories: 0, bytes: stats.size };
     }
     if (!stats.isDirectory()) {
-      return { files: 0, directories: 0 };
+      return { files: 0, directories: 0, bytes: 0 };
     }
     const entries = await fs.readdir(localPath, { withFileTypes: true });
     let files = 0;
     let directories = 1;
+    let bytes = 0;
     for (const entry of entries) {
       const summary = await this.summarizeLocalPath(path.join(localPath, entry.name));
       files += summary.files;
       directories += summary.directories;
+      bytes += summary.bytes;
     }
-    return { files, directories };
+    return { files, directories, bytes };
+  }
+
+  /** Total byte size of everything under the given local paths (files only). */
+  private async countLocalBytes(localPaths: string[]): Promise<number> {
+    let total = 0;
+    for (const localPath of localPaths) {
+      total += (await this.summarizeLocalPath(localPath)).bytes;
+    }
+    return total;
+  }
+
+  /** Total byte size of a remote file or directory tree, via SFTP or shell. */
+  private async countRemoteBytes(remotePath: string, sftp?: SFTPWrapper): Promise<number> {
+    const targetSftp = sftp ?? this.sftp;
+    const stats = await this.statPath(remotePath, targetSftp ?? undefined);
+    if (!isDirectory(stats.mode)) {
+      return typeof stats.size === 'number' ? stats.size : 0;
+    }
+    const entries = targetSftp
+      ? await this.readDirWithSftp(remotePath, targetSftp)
+      : await this.readDirWithShell(remotePath);
+    let total = 0;
+    for (const entry of entries) {
+      total += await this.countRemoteBytes(entry.path, targetSftp ?? undefined);
+    }
+    return total;
+  }
+
+  private async countRemoteBytesWithShell(remotePath: string): Promise<number> {
+    const entryKind = await this.getRemoteEntryKindWithShell(remotePath);
+    if (entryKind === 'file') {
+      const command = `wc -c < ${quoteForShell(remotePath)}`;
+      const { stdout, exitCode } = await this.execRemoteCommand(command);
+      if (exitCode !== 0) {
+        return 0;
+      }
+      const parsed = Number.parseInt(stdout.trim(), 10);
+      return Number.isFinite(parsed) ? parsed : 0;
+    }
+    const entries = await this.readDirWithShell(remotePath);
+    let total = 0;
+    for (const entry of entries) {
+      total += await this.countRemoteBytesWithShell(entry.path);
+    }
+    return total;
   }
 
   private async countLocalPath(localPath: string): Promise<number> {
@@ -3681,6 +4483,7 @@ export class SshSessionManager {
     }
 
     const terminalEntries = [...this.terminals.entries()];
+    void this.idleTransfers.stopSession();
     void this.languageServers.stopAll();
     void this.stopAllTunnels().finally(() => {
       this.tunnelStates.clear();
@@ -3707,6 +4510,8 @@ export class SshSessionManager {
     this.visionModeDisplay = null;
     this.homeDir = null;
     this.directoryCache.clear();
+    this.stopHostMetrics();
+    this.persistentShellKind = null;
 
     this.emitConnectionState({
       state: 'disconnected',

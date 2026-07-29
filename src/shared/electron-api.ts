@@ -1,7 +1,16 @@
 import type {
   DeleteRemoteEntryInput,
+  CreateTerminalInput,
   CreateTerminalResult,
   CreateRemoteEntryInput,
+  HostMetricsEvent,
+  HostMetricsSnapshot,
+  IdleTransferSnapshot,
+  QueueIdleDownloadInput,
+  ReadRemoteBinaryFileInput,
+  RemoteBinaryFilePayload,
+  RemoteShellSupport,
+  TransferCapabilities,
   ConnectInput,
   ConnectResult,
   ConnectionStatePayload,
@@ -50,18 +59,30 @@ export interface ElectronApi {
   updateSavedConnectionWorkspace: (savedConnectionId: string, workspacePath: string) => Promise<void>;
   readDir: (remotePath: string) => Promise<RemoteDirectoryEntry[]>;
   readFile: (remotePath: string) => Promise<RemoteFilePayload>;
+  readBinaryFile: (input: ReadRemoteBinaryFileInput) => Promise<RemoteBinaryFilePayload>;
+  startAutomaticMediaCache: (remoteDirectory: string) => Promise<IdleTransferSnapshot>;
+  queueIdleDownload: (input: QueueIdleDownloadInput) => Promise<IdleTransferSnapshot | null>;
+  getIdleTransferSnapshot: () => Promise<IdleTransferSnapshot>;
   writeFileAtomic: (input: SaveRemoteFileInput) => Promise<SaveRemoteFileResult>;
   createEntry: (input: CreateRemoteEntryInput) => Promise<RemoteDirectoryEntry>;
   renameEntry: (input: RenameRemoteEntryInput) => Promise<RemoteDirectoryEntry>;
   deleteEntry: (input: DeleteRemoteEntryInput) => Promise<void>;
   uploadLocalEntries: (input: UploadLocalEntriesInput) => Promise<FileOperationResult>;
   downloadEntry: (input: DownloadRemoteEntryInput) => Promise<FileOperationResult>;
+  cancelFileOperation: (operationId: string) => Promise<void>;
+  getTransferCapabilities: () => Promise<TransferCapabilities>;
   searchInFiles: (input: SearchRemoteFilesInput) => Promise<SearchRemoteFilesResult>;
   pickPrivateKeyPath: () => Promise<string | null>;
   pickKnownHostsPath: () => Promise<string | null>;
   pickUploadEntries: () => Promise<string[]>;
   pickDownloadDirectory: () => Promise<string | null>;
-  createTerminal: () => Promise<CreateTerminalResult>;
+  createTerminal: (input?: CreateTerminalInput) => Promise<CreateTerminalResult>;
+  getRemoteShellSupport: () => Promise<RemoteShellSupport>;
+  killRemoteShellSession: (sessionName: string) => Promise<void>;
+  startHostMetrics: (workspacePath: string, intervalMs?: number) => Promise<void>;
+  stopHostMetrics: () => Promise<void>;
+  refreshHostMetrics: (workspacePath: string) => Promise<HostMetricsSnapshot>;
+  onHostMetrics: (callback: (event: HostMetricsEvent) => void) => () => void;
   writeTerminal: (terminalId: string, data: string) => Promise<void>;
   resizeTerminal: (terminalId: string, cols: number, rows: number) => Promise<void>;
   closeTerminal: (terminalId: string) => Promise<void>;

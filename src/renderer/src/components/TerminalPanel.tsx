@@ -1,11 +1,16 @@
-import { Columns2, Plus, X } from 'lucide-react';
+import { Columns2, Link2, Plus, RefreshCw, Trash2, X } from 'lucide-react';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import { Fragment, forwardRef, memo, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import type { ForwardedRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 
-import type { ConnectionStatePayload, TerminalEvent } from '../../../shared/contracts';
+import type {
+  ConnectionStatePayload,
+  PersistentShellKind,
+  RemoteShellSessionSummary,
+  TerminalEvent,
+} from '../../../shared/contracts';
 import { getScaledFontSize, useWindowFontScale } from '../window-font-scale';
 
 interface TerminalPanelProps {
@@ -21,6 +26,8 @@ export interface TerminalPanelHandle {
 interface TerminalSessionItem {
   id: string;
   label: string;
+  /** Set when this shell runs inside a tmux/screen session on the remote host. */
+  sessionName?: string;
 }
 
 type TerminalSinkSource = 'live' | 'replay';
@@ -32,6 +39,26 @@ interface RegisteredTerminalSink {
 }
 
 const MAX_REPLAY_EVENTS_PER_TERMINAL = 2000;
+const SESSION_NAME_PREFIX = 'sshstudio';
+
+function buildSessionName(workspacePath: string, index: number): string {
+  const leaf = workspacePath
+    .split('/')
+    .filter((segment) => segment !== '')
+    .pop();
+  const base = leaf ? `${SESSION_NAME_PREFIX}-${leaf}` : SESSION_NAME_PREFIX;
+  return index > 1 ? `${base}-${index}` : base;
+}
+
+function describeSession(session: RemoteShellSessionSummary): string {
+  const parts: string[] = [];
+  if (session.windows !== undefined) {
+    parts.push(`${session.windows} window${session.windows === 1 ? '' : 's'}`);
+  }
+  parts.push(session.attached ? 'attached' : 'detached');
+  return parts.join(' · ');
+}
+
 interface TerminalInstanceProps {
   active: boolean;
   onActivate: () => void;
@@ -270,6 +297,12 @@ function TerminalPanelComponent({
   const [busyAction, setBusyAction] = useState<'creating' | 'splitting' | null>(null);
   const [terminals, setTerminals] = useState<TerminalSessionItem[]>([]);
   const [visibleTerminalIds, setVisibleTerminalIds] = useState<string[]>([]);
+  const [persistentKind, setPersistentKind] = useState<PersistentShellKind>('none');
+  const [remoteSessions, setRemoteSessions] = useState<RemoteShellSessionSummary[]>([]);
+  const [sessionPickerOpen, setSessionPickerOpen] = useState(false);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const persistentKindRef = useRef<PersistentShellKind>('none');
+  const sessionPickerRef = useRef<HTMLDivElement | null>(null);
   const activeTerminalIdRef = useRef<string | null>(null);
   const bootstrappedConnectionIdRef = useRef<string | null>(null);
   const connectionIdRef = useRef<string | null>(connectionStatus.connectionId ?? null);
@@ -333,10 +366,14 @@ function TerminalPanelComponent({
       syncedPathsRef.current.clear();
       terminalStatesRef.current.clear();
       terminalSinksRef.current.clear();
+      persistentKindRef.current = 'none';
       setActiveTerminalId(null);
       setBusyAction(null);
       setTerminals([]);
       setVisibleTerminalIds([]);
+      setPersistentKind('none');
+      setRemoteSessions([]);
+      setSessionPickerOpen(false);
       return;
     }
 
@@ -351,9 +388,36 @@ function TerminalPanelComponent({
     syncedPathsRef.current.clear();
     terminalStatesRef.current.clear();
     terminalSinksRef.current.clear();
+    persistentKindRef.current = 'none';
     setActiveTerminalId(null);
     setTerminals([]);
     setVisibleTerminalIds([]);
+    setPersistentKind('none');
+    setRemoteSessions([]);
+    setSessionPickerOpen(false);
+
+    // Probe once per connection so the toolbar can show whether new shells will
+    // survive a disconnect, and so a reconnect can offer the sessions that are
+    // still running from before.
+    let cancelled = false;
+    void window.electronAPI
+      .getRemoteShellSupport()
+      .then((support) => {
+        if (cancelled || connectionIdRef.current !== connectionId) {
+          return;
+        }
+
+        persistentKindRef.current = support.kind;
+        setPersistentKind(support.kind);
+        setRemoteSessions(support.sessions);
+      })
+      .catch(() => {
+        // A failed probe just means shells stay non-persistent.
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [connectionStatus.connectionId, connectionStatus.state]);
 
   useEffect(() => {
@@ -363,6 +427,13 @@ function TerminalPanelComponent({
 
     for (const terminal of terminals) {
       if (terminalStatesRef.current.get(terminal.id) !== 'open') {
+        continue;
+      }
+
+      // Persistent sessions may be running a long job rather than sitting at a
+      // prompt, so a `cd` would be typed straight into that program's stdin.
+      // Their working directory is set once when the session is created instead.
+      if (terminal.sessionName) {
         continue;
       }
 
@@ -376,6 +447,23 @@ function TerminalPanelComponent({
       });
     }
   }, [connectionStatus.state, terminals, workspacePath]);
+
+  useEffect(() => {
+    if (!sessionPickerOpen) {
+      return;
+    }
+
+    function handlePointerDown(event: MouseEvent): void {
+      if (!sessionPickerRef.current?.contains(event.target as Node)) {
+        setSessionPickerOpen(false);
+      }
+    }
+
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+    };
+  }, [sessionPickerOpen]);
 
   const registerSink = useCallback((terminalId: string, sink: TerminalSink): (() => void) => {
     const replayLog = replayLogRef.current.get(terminalId) ?? [];
@@ -427,6 +515,27 @@ function TerminalPanelComponent({
     setActiveTerminalId(nextActiveId);
   }
 
+  /**
+   * Picks a session name that is not already running on the host. Reusing a name
+   * would silently attach to someone else's (or a previous run's) session, and
+   * anything typed afterwards would land in whatever program it is running.
+   */
+  function buildUnusedSessionName(): string {
+    const taken = new Set<string>([
+      ...remoteSessions.map((session) => session.name),
+      ...terminalsRef.current.map((terminal) => terminal.sessionName ?? ''),
+    ]);
+
+    for (let index = 1; index <= 200; index += 1) {
+      const candidate = buildSessionName(workspacePath, index);
+      if (!taken.has(candidate)) {
+        return candidate;
+      }
+    }
+
+    return `${buildSessionName(workspacePath, 1)}-${Date.now()}`;
+  }
+
   async function openTerminal(mode: 'new' | 'split', silent = false, labelOverride?: string): Promise<string | null> {
     if (connectionStatus.state !== 'connected' || !connectionStatus.connectionId) {
       onStatusMessage('Connect before opening a terminal');
@@ -437,7 +546,11 @@ function TerminalPanelComponent({
     setBusyAction(mode === 'split' ? 'splitting' : 'creating');
 
     try {
-      const result = await window.electronAPI.createTerminal();
+      const result = await window.electronAPI.createTerminal(
+        persistentKindRef.current === 'none'
+          ? undefined
+          : { sessionName: buildUnusedSessionName(), workspacePath },
+      );
       if (connectionIdRef.current !== expectedConnectionId) {
         ignoredTerminalIdsRef.current.add(result.terminalId);
         void window.electronAPI.closeTerminal(result.terminalId).catch(() => {
@@ -449,9 +562,10 @@ function TerminalPanelComponent({
       const normalizedLabel = labelOverride?.trim();
       const label = normalizedLabel ? normalizedLabel.slice(0, 48) : `Terminal ${nextTerminalNumberRef.current}`;
       nextTerminalNumberRef.current += 1;
-      const nextTerminal = {
+      const nextTerminal: TerminalSessionItem = {
         id: result.terminalId,
         label,
+        sessionName: result.sessionName,
       };
 
       replayLogRef.current.set(result.terminalId, replayLogRef.current.get(result.terminalId) ?? []);
@@ -522,6 +636,106 @@ function TerminalPanelComponent({
     [connectionStatus.connectionId, connectionStatus.state, onStatusMessage, workspacePath],
   );
 
+  async function refreshRemoteSessions(): Promise<void> {
+    if (connectionStatus.state !== 'connected') {
+      return;
+    }
+
+    setSessionsLoading(true);
+    try {
+      const support = await window.electronAPI.getRemoteShellSupport();
+      persistentKindRef.current = support.kind;
+      setPersistentKind(support.kind);
+      setRemoteSessions(support.sessions);
+    } catch (error) {
+      onStatusMessage(getErrorMessage(error, 'Unable to list remote sessions'));
+    } finally {
+      setSessionsLoading(false);
+    }
+  }
+
+  /**
+   * Re-attaches to a session that is already running on the host, e.g. a training
+   * run started before the last disconnect.
+   */
+  async function attachRemoteSession(session: RemoteShellSessionSummary): Promise<void> {
+    const existing = terminalsRef.current.find((terminal) => terminal.sessionName === session.name);
+    if (existing) {
+      revealTerminal(existing.id);
+      setSessionPickerOpen(false);
+      return;
+    }
+
+    if (connectionStatus.state !== 'connected' || !connectionStatus.connectionId) {
+      onStatusMessage('Connect before attaching to a session');
+      return;
+    }
+
+    const expectedConnectionId = connectionStatus.connectionId;
+    setBusyAction('creating');
+
+    try {
+      const result = await window.electronAPI.createTerminal({ sessionName: session.name });
+      if (connectionIdRef.current !== expectedConnectionId) {
+        ignoredTerminalIdsRef.current.add(result.terminalId);
+        void window.electronAPI.closeTerminal(result.terminalId).catch(() => {
+          // Ignore stale terminal cleanup failures after a reconnect.
+        });
+        return;
+      }
+
+      const nextTerminal: TerminalSessionItem = {
+        id: result.terminalId,
+        label: session.name,
+        sessionName: result.sessionName ?? session.name,
+      };
+      nextTerminalNumberRef.current += 1;
+
+      replayLogRef.current.set(result.terminalId, replayLogRef.current.get(result.terminalId) ?? []);
+      syncedPathsRef.current.set(result.terminalId, null);
+      terminalStatesRef.current.set(result.terminalId, 'open');
+
+      setTerminals((previous) => {
+        const next = [...previous, nextTerminal];
+        terminalsRef.current = next;
+        return next;
+      });
+      setVisibleTerminalIds(() => {
+        const next = [result.terminalId];
+        visibleTerminalIdsRef.current = next;
+        return next;
+      });
+      setActiveTerminalId(result.terminalId);
+      activeTerminalIdRef.current = result.terminalId;
+      setSessionPickerOpen(false);
+      onStatusMessage(`Attached to ${session.name}`);
+    } catch (error) {
+      onStatusMessage(getErrorMessage(error, `Unable to attach to ${session.name}`));
+    } finally {
+      setBusyAction(null);
+    }
+  }
+
+  /**
+   * Ends a persistent session on the host, killing whatever it is running. The
+   * local tab is closed first so its channel does not report the kill as an
+   * unexpected session error.
+   */
+  async function killRemoteSession(session: RemoteShellSessionSummary): Promise<void> {
+    const attachedTerminal = terminalsRef.current.find((terminal) => terminal.sessionName === session.name);
+    if (attachedTerminal) {
+      await closeTerminal(attachedTerminal.id);
+    }
+
+    try {
+      await window.electronAPI.killRemoteShellSession(session.name);
+      setRemoteSessions((previous) => previous.filter((item) => item.name !== session.name));
+      onStatusMessage(`Ended session ${session.name}`);
+    } catch (error) {
+      onStatusMessage(getErrorMessage(error, `Unable to end session ${session.name}`));
+    }
+  }
+
   async function closeTerminal(terminalId: string): Promise<void> {
     const terminal = terminalsRef.current.find((item) => item.id === terminalId);
     if (!terminal) {
@@ -553,6 +767,9 @@ function TerminalPanelComponent({
   const visibleTerminals = visibleTerminalIds
     .map((terminalId) => terminals.find((terminal) => terminal.id === terminalId) ?? null)
     .filter((terminal): terminal is TerminalSessionItem => terminal !== null);
+  const attachedSessionNames = new Set(
+    terminals.map((terminal) => terminal.sessionName).filter((name): name is string => name !== undefined),
+  );
 
   return (
     <section className="terminal-panel">
@@ -562,6 +779,18 @@ function TerminalPanelComponent({
           <span>
             {isConnected ? `${terminals.length} shell${terminals.length === 1 ? '' : 's'}` : 'Waiting for connection'}
           </span>
+          {isConnected ? (
+            <span
+              className={`terminal-persist-badge terminal-persist-${persistentKind === 'none' ? 'off' : 'on'}`}
+              title={
+                persistentKind === 'none'
+                  ? 'Neither tmux nor screen is installed on the remote host, so shells end when the connection drops. Install tmux to keep long jobs running.'
+                  : `Shells run inside ${persistentKind} sessions and keep running after a disconnect`
+              }
+            >
+              {persistentKind === 'none' ? 'not persistent' : persistentKind}
+            </span>
+          ) : null}
         </div>
 
         {terminals.length > 0 ? (
@@ -578,11 +807,14 @@ function TerminalPanelComponent({
                   <button
                     type="button"
                     className="terminal-tab-main"
-                    title={terminal.label}
+                    title={terminal.sessionName ? `${terminal.label} · ${terminal.sessionName}` : terminal.label}
                     onClick={() => {
                       revealTerminal(terminal.id);
                     }}
                   >
+                    {terminal.sessionName ? (
+                      <Link2 className="terminal-tab-persist-icon" size={11} />
+                    ) : null}
                     <span className="terminal-tab-name">{terminal.label}</span>
                     {isVisible && visibleTerminalIds.length > 1 ? (
                       <span className="terminal-tab-badge">Split</span>
@@ -591,7 +823,11 @@ function TerminalPanelComponent({
                   <button
                     type="button"
                     className="terminal-tab-close"
-                    title={`Close ${terminal.label}`}
+                    title={
+                      terminal.sessionName
+                        ? `Detach from ${terminal.sessionName} (keeps running on the host)`
+                        : `Close ${terminal.label}`
+                    }
                     onClick={() => {
                       void closeTerminal(terminal.id);
                     }}
@@ -605,6 +841,85 @@ function TerminalPanelComponent({
         ) : null}
 
         <div className="terminal-toolbar">
+          {persistentKind !== 'none' ? (
+            <div className="terminal-session-menu" ref={sessionPickerRef}>
+              <button
+                type="button"
+                className={`icon-button terminal-toolbar-button${sessionPickerOpen ? ' terminal-toolbar-button-open' : ''}`}
+                title="Remote sessions: re-attach to a shell that is still running on the host"
+                disabled={!isConnected || busyAction !== null}
+                onClick={() => {
+                  const nextOpen = !sessionPickerOpen;
+                  setSessionPickerOpen(nextOpen);
+                  if (nextOpen) {
+                    void refreshRemoteSessions();
+                  }
+                }}
+              >
+                <Link2 size={14} />
+              </button>
+
+              {sessionPickerOpen ? (
+                <div className="terminal-session-dropdown">
+                  <div className="terminal-session-dropdown-header">
+                    <span>Remote {persistentKind} sessions</span>
+                    <button
+                      type="button"
+                      className="icon-button"
+                      title="Refresh"
+                      disabled={sessionsLoading}
+                      onClick={() => {
+                        void refreshRemoteSessions();
+                      }}
+                    >
+                      <RefreshCw className={sessionsLoading ? 'spin' : ''} size={13} />
+                    </button>
+                  </div>
+
+                  {remoteSessions.length === 0 ? (
+                    <p className="terminal-session-empty">
+                      {sessionsLoading ? 'Loading sessions' : 'No sessions running on this host'}
+                    </p>
+                  ) : (
+                    <ul className="terminal-session-list">
+                      {remoteSessions.map((session) => {
+                        const attachedHere = attachedSessionNames.has(session.name);
+
+                        return (
+                          <li key={session.name} className="terminal-session-item">
+                            <button
+                              type="button"
+                              className="terminal-session-attach"
+                              title={attachedHere ? 'Show this session' : `Attach to ${session.name}`}
+                              disabled={busyAction !== null}
+                              onClick={() => {
+                                void attachRemoteSession(session);
+                              }}
+                            >
+                              <span className="terminal-session-name">{session.name}</span>
+                              <span className="terminal-session-meta">
+                                {attachedHere ? 'open here' : describeSession(session)}
+                              </span>
+                            </button>
+                            <button
+                              type="button"
+                              className="terminal-session-kill"
+                              title={`End ${session.name} and stop whatever it is running`}
+                              onClick={() => {
+                                void killRemoteSession(session);
+                              }}
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
           <button
             type="button"
             className="icon-button terminal-toolbar-button"

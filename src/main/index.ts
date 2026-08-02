@@ -564,6 +564,12 @@ function registerIpc(): void {
   ipcMain.handle(IPC_CHANNELS.idleTransferSnapshot, (event) =>
     getSessionManager(event.sender.id).getIdleTransferSnapshot(),
   );
+  ipcMain.handle(IPC_CHANNELS.cancelIdleDownload, (event, remotePath: string) =>
+    getSessionManager(event.sender.id).cancelIdleDownload(remotePath),
+  );
+  ipcMain.handle(IPC_CHANNELS.cancelIdleDownloadGroup, (event, groupPath: string) =>
+    getSessionManager(event.sender.id).cancelIdleDownloadGroup(groupPath),
+  );
   ipcMain.handle(IPC_CHANNELS.writeFileAtomic, (event, input: SaveRemoteFileInput) =>
     getSessionManager(event.sender.id).writeFileAtomic(input),
   );

@@ -24,6 +24,8 @@ const electronApi: ElectronApi = {
     ipcRenderer.invoke(IPC_CHANNELS.startAutomaticMediaCache, remoteDirectory),
   queueIdleDownload: (input) => ipcRenderer.invoke(IPC_CHANNELS.queueIdleDownload, input),
   getIdleTransferSnapshot: () => ipcRenderer.invoke(IPC_CHANNELS.idleTransferSnapshot),
+  cancelIdleDownload: (remotePath) => ipcRenderer.invoke(IPC_CHANNELS.cancelIdleDownload, remotePath),
+  cancelIdleDownloadGroup: (groupPath) => ipcRenderer.invoke(IPC_CHANNELS.cancelIdleDownloadGroup, groupPath),
   writeFileAtomic: (input) => ipcRenderer.invoke(IPC_CHANNELS.writeFileAtomic, input),
   createEntry: (input) => ipcRenderer.invoke(IPC_CHANNELS.createEntry, input),
   renameEntry: (input) => ipcRenderer.invoke(IPC_CHANNELS.renameEntry, input),

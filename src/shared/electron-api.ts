@@ -63,6 +63,8 @@ export interface ElectronApi {
   startAutomaticMediaCache: (remoteDirectory: string) => Promise<IdleTransferSnapshot>;
   queueIdleDownload: (input: QueueIdleDownloadInput) => Promise<IdleTransferSnapshot | null>;
   getIdleTransferSnapshot: () => Promise<IdleTransferSnapshot>;
+  cancelIdleDownload: (remotePath: string) => Promise<IdleTransferSnapshot>;
+  cancelIdleDownloadGroup: (groupPath: string) => Promise<IdleTransferSnapshot>;
   writeFileAtomic: (input: SaveRemoteFileInput) => Promise<SaveRemoteFileResult>;
   createEntry: (input: CreateRemoteEntryInput) => Promise<RemoteDirectoryEntry>;
   renameEntry: (input: RenameRemoteEntryInput) => Promise<RemoteDirectoryEntry>;

@@ -1,6 +1,6 @@
 {
   "name": "ssh-studio",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "Desktop SSH client with SFTP file tree, Monaco editor, and integrated terminal.",
   "author": {

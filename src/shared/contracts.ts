@@ -298,10 +298,19 @@ export interface RemoteBinaryFilePayload {
 
 export interface IdleTransferSnapshot {
   queuedItems: number;
+  /** Paths waiting behind the current idle transfer. */
+  queuedPaths: string[];
   activePath?: string;
   cachedBytes: number;
   /** Automatic preview cache is hard-capped at 3 GiB. */
   cacheLimitBytes: number;
+  manualGroups: IdleTransferGroup[];
+}
+
+export interface IdleTransferGroup {
+  rootPath: string;
+  activePath?: string;
+  queuedPaths: string[];
 }
 
 export interface QueueIdleDownloadInput {
@@ -517,6 +526,8 @@ export const IPC_CHANNELS = {
   startAutomaticMediaCache: 'sftp:startAutomaticMediaCache',
   queueIdleDownload: 'sftp:queueIdleDownload',
   idleTransferSnapshot: 'sftp:idleTransferSnapshot',
+  cancelIdleDownload: 'sftp:cancelIdleDownload',
+  cancelIdleDownloadGroup: 'sftp:cancelIdleDownloadGroup',
   terminalCreate: 'terminal:create',
   terminalShellSupport: 'terminal:shellSupport',
   terminalKillSession: 'terminal:killSession',

@@ -103,4 +103,23 @@ describe('IdleTransferManager', () => {
     await manager.stopSession();
     expect(await fs.readFile(path.join(destination, 'a.bin'), 'utf8')).toBe('a');
   });
+
+  it('cancels an active idle download without stopping the idle worker', async () => {
+    const source: IdleTransferSource = {
+      stat: async () => ({ kind: 'file', size: 1 }),
+      readDir: async () => [],
+      createReadStream: () => new Readable({ read() {} }),
+    };
+    const destinationRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'ssh-studio-idle-cancel-'));
+    cleanupPaths.push(destinationRoot);
+    const manager = new IdleTransferManager(source, 8, immediateGovernor);
+    await manager.startSession();
+
+    await manager.queueManualDownload('/slow.bin', path.join(destinationRoot, 'slow.bin'));
+    await waitFor(() => manager.snapshot().activePath === '/slow.bin');
+
+    expect(manager.cancelGroup('/slow.bin').activePath).toBe('/slow.bin');
+    await waitFor(() => !manager.snapshot().activePath && manager.snapshot().queuedItems === 0);
+    await manager.stopSession();
+  });
 });

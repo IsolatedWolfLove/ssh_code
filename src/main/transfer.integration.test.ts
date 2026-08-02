@@ -216,6 +216,39 @@ describe('resumable transfer engine (real SFTP)', () => {
     expect(last.totalBytes).toBe(payload.length);
   });
 
+  it('downloads a directory recursively', async () => {
+    await fs.mkdir(path.join(remoteRoot, 'project', 'nested'), { recursive: true });
+    await fs.writeFile(path.join(remoteRoot, 'project', 'README.md'), 'top level');
+    await fs.writeFile(path.join(remoteRoot, 'project', 'nested', 'data.txt'), 'nested');
+    const localTarget = path.join(localRoot, 'project');
+
+    const result = await manager.downloadEntry({
+      operationId: 'download-directory',
+      remotePath: '/project',
+      localPath: localTarget,
+      conflictStrategy: 'overwrite',
+    });
+
+    expect(result.status).toBe('completed');
+    await expect(fs.readFile(path.join(localTarget, 'README.md'), 'utf8')).resolves.toBe('top level');
+    await expect(fs.readFile(path.join(localTarget, 'nested', 'data.txt'), 'utf8')).resolves.toBe('nested');
+    expect(events.some((event) => event.operationId === 'download-directory' && event.status === 'completed')).toBe(true);
+  });
+
+  it('deletes a directory that contains a hidden resumable-transfer .part file', async () => {
+    const directory = path.join(remoteRoot, 'stale-transfer');
+    await fs.mkdir(directory);
+    await fs.writeFile(path.join(directory, `interrupted.bin${PART_SUFFIX}`), 'partial');
+
+    // The regular explorer list keeps temporary parts out of sight.
+    expect(await manager.readDir('/stale-transfer')).toEqual([]);
+
+    await manager.deleteEntry({ path: '/stale-transfer', operationId: 'delete-part-directory' });
+
+    await expect(fs.access(directory)).rejects.toThrow();
+    expect(events.some((event) => event.operationId === 'delete-part-directory' && event.status === 'completed')).toBe(true);
+  });
+
   it('resumes a download from a partial local .part (append, no re-fetch)', async () => {
     const payload = Buffer.alloc(300 * 1024, 2);
     await fs.writeFile(path.join(remoteRoot, 'dl-resume.bin'), payload);

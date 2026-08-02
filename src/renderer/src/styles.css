@@ -1938,6 +1938,7 @@ button {
 }
 
 .statusbar {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1947,6 +1948,10 @@ button {
   background: rgba(7, 11, 17, 0.94);
   color: var(--text-secondary);
   font-size: 0.75rem;
+}
+
+.statusbar > .statusbar-section:first-child {
+  flex: 1 1 180px;
 }
 
 .statusbar-section {
@@ -1963,7 +1968,114 @@ button {
 }
 
 .statusbar-file-op {
-  flex: 1 1 auto;
+  flex: 0 0 clamp(280px, 34vw, 460px);
+  width: clamp(280px, 34vw, 460px);
+}
+
+.download-queue-control {
+  position: relative;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.statusbar-queue-button {
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.statusbar-queue-button:hover {
+  color: var(--text-primary);
+}
+
+.download-queue-popover {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 20;
+  width: min(460px, calc(100vw - 24px));
+  max-height: 320px;
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: #101722;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.35);
+}
+
+.download-queue-heading {
+  margin-bottom: 8px;
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.download-queue-list {
+  display: grid;
+  gap: 8px;
+}
+
+.download-queue-group {
+  min-width: 0;
+}
+
+.download-queue-group summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.download-queue-group-items {
+  display: grid;
+  gap: 3px;
+  margin: 6px 0 0 14px;
+  color: var(--text-secondary);
+}
+
+.download-queue-group-items span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.download-queue-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.download-queue-item-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.download-queue-path {
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.statusbar-file-operations {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.statusbar-file-operations::-webkit-scrollbar {
+  display: none;
 }
 
 .statusbar-file-op-failed {

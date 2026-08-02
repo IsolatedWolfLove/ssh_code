@@ -814,6 +814,14 @@ export class SshSessionManager {
     return this.idleTransfers.snapshot();
   }
 
+  cancelIdleDownload(remotePath: string) {
+    return this.idleTransfers.cancel(remotePath);
+  }
+
+  cancelIdleDownloadGroup(groupPath: string) {
+    return this.idleTransfers.cancelGroup(groupPath);
+  }
+
   startLanguageServer(input: StartLanguageServerInput): Promise<StartLanguageServerResult> {
     return this.languageServers.start(this.requireInteractiveClient(), input);
   }
@@ -1094,17 +1102,31 @@ export class SshSessionManager {
       'download',
       input.remotePath,
       input.localPath,
-      transfer.sftp
-        ? await this.countRemoteItems(input.remotePath, transfer.sftp)
-        : await this.countRemoteItemsWithShell(input.remotePath),
-      transfer.sftp
-        ? await this.countRemoteBytes(input.remotePath, transfer.sftp)
-        : await this.countRemoteBytesWithShell(input.remotePath),
+      // Start immediately. Recursive enumeration of a large directory can take
+      // minutes over SFTP, so totals are filled in asynchronously below.
+      1,
+      0,
       transfer.sftp ? 'sftp' : 'shell',
     );
     this.registerOperationCancel(progress);
 
     this.emitFileOperationState(progress, 'running', `Downloading ${input.remotePath}`);
+    void (async () => {
+      const [totalItems, totalBytes] = transfer.sftp
+        ? await Promise.all([
+            this.countRemoteItems(input.remotePath, transfer.sftp),
+            this.countRemoteBytes(input.remotePath, transfer.sftp),
+          ])
+        : await Promise.all([
+            this.countRemoteItemsWithShell(input.remotePath),
+            this.countRemoteBytesWithShell(input.remotePath),
+          ]);
+      if (this.activeTransfers.has(input.operationId) && !progress.canceled) {
+        progress.totalItems = Math.max(totalItems, 1);
+        progress.totalBytes = totalBytes;
+        this.emitFileOperationState(progress, 'running', `Downloading ${input.remotePath}`);
+      }
+    })().catch(() => undefined);
     try {
       if (transfer.sftp) {
         const stats = await this.statPath(input.remotePath, transfer.sftp);
@@ -3033,8 +3055,8 @@ export class SshSessionManager {
     }
 
     const exists = await new Promise<boolean>((resolve) => {
-      sftp.exists(remotePath, (hasError) => {
-        resolve(!hasError);
+      sftp.exists(remotePath, (exists) => {
+        resolve(exists);
       });
     });
 
@@ -3624,7 +3646,11 @@ export class SshSessionManager {
     }
   }
 
-  private async readDirWithSftp(remotePath: string, sftp: SFTPWrapper): Promise<RemoteDirectoryEntry[]> {
+  private async readDirWithSftp(
+    remotePath: string,
+    sftp: SFTPWrapper,
+    includePartialFiles = false,
+  ): Promise<RemoteDirectoryEntry[]> {
     const entries = await new Promise<FileEntryWithStats[]>((resolve, reject) => {
       sftp.readdir(remotePath, (error: Error | undefined, items: FileEntryWithStats[]) => {
         if (error) {
@@ -3639,7 +3665,9 @@ export class SshSessionManager {
     return entries
       .filter(
         (entry: FileEntryWithStats) =>
-          entry.filename !== '.' && entry.filename !== '..' && !entry.filename.endsWith(PART_SUFFIX),
+          entry.filename !== '.' &&
+          entry.filename !== '..' &&
+          (includePartialFiles || !entry.filename.endsWith(PART_SUFFIX)),
       )
       .map((entry: FileEntryWithStats): RemoteDirectoryEntry => ({
         name: entry.filename,
@@ -3657,7 +3685,7 @@ export class SshSessionManager {
       });
   }
 
-  private async readDirWithShell(remotePath: string): Promise<RemoteDirectoryEntry[]> {
+  private async readDirWithShell(remotePath: string, includePartialFiles = false): Promise<RemoteDirectoryEntry[]> {
     const command = [
       `dir=${quoteForShell(remotePath)}`,
       'cd "$dir" || exit 1',
@@ -3685,7 +3713,7 @@ export class SshSessionManager {
 
         const kind = line.slice(0, separatorIndex) === 'directory' ? 'directory' : 'file';
         const name = line.slice(separatorIndex + 1);
-        if (name === '' || name === '.' || name === '..' || name.endsWith(PART_SUFFIX)) {
+        if (name === '' || name === '.' || name === '..' || (!includePartialFiles && name.endsWith(PART_SUFFIX))) {
           return null;
         }
 
@@ -3707,7 +3735,11 @@ export class SshSessionManager {
 
   private async deleteRemotePath(remotePath: string, progress?: FileOperationProgress): Promise<void> {
     if ((await this.getRemoteEntryKind(remotePath)) === 'directory') {
-      const entries = await this.readDir(remotePath);
+      // The explorer intentionally hides resumable-transfer `.part` files, but
+      // they still make a directory non-empty. Deletion must enumerate them.
+      const entries = this.sftp
+        ? await this.readDirWithSftp(remotePath, this.sftp, true)
+        : await this.readDirWithShell(remotePath, true);
       for (const entry of entries) {
         await this.deleteRemotePath(entry.path, progress);
       }
@@ -4068,6 +4100,11 @@ export class SshSessionManager {
         ? { ...config, sock: await this.createJumpStream(this.jumpClient, config.host!, config.port!) }
         : config;
     const client = new Client();
+    // A socket can report a second error while it is being closed after a
+    // failed handshake. Keep a permanent listener so it never escapes as an
+    // uncaught Electron main-process exception; the one-shot listener below
+    // still rejects the connection attempt with the first useful error.
+    client.on('error', () => undefined);
     let authUrl: string | null = null;
 
     const emitTailscaleAuthState = (message: string): void => {
@@ -4189,8 +4226,20 @@ export class SshSessionManager {
   }
 
   private async createConnectedClientWithTimeout(config: ConnectConfig, timeoutMs: number): Promise<SshClient> {
+    // Auxiliary sessions must follow the same route as the interactive one.
+    // In particular, when a jump host is active, establish a fresh channel on
+    // the already-authenticated jump connection instead of attempting a direct
+    // TCP connection to the target host.
+    const effectiveConfig: ConnectConfig =
+      this.jumpClient && !config.sock
+        ? { ...config, sock: await this.createJumpStream(this.jumpClient, config.host!, config.port!) }
+        : config;
+
     return new Promise<SshClient>((resolve, reject) => {
       const client = new Client();
+      // See createConnectedClient: this remains installed after the handshake
+      // listeners have settled and protects against late ECONNRESET events.
+      client.on('error', () => undefined);
       let settled = false;
       const timeout = setTimeout(() => {
         if (settled) {
@@ -4199,6 +4248,7 @@ export class SshSessionManager {
 
         settled = true;
         client.removeAllListeners();
+        client.on('error', () => undefined);
         client.end();
         reject(new Error('Timed out while waiting for handshake'));
       }, timeoutMs);
@@ -4211,6 +4261,7 @@ export class SshSessionManager {
         settled = true;
         clearTimeout(timeout);
         client.removeAllListeners();
+        client.on('error', () => undefined);
         client.end();
         reject(error);
       };
@@ -4218,6 +4269,7 @@ export class SshSessionManager {
       client.once('ready', () => {
         if (settled) {
           client.removeAllListeners();
+          client.on('error', () => undefined);
           client.end();
           return;
         }
@@ -4236,7 +4288,7 @@ export class SshSessionManager {
         settleError(new Error('Connection ended before handshake'));
       });
 
-      client.connect(config);
+      client.connect(effectiveConfig);
     });
   }
 
@@ -4291,6 +4343,7 @@ export class SshSessionManager {
       const client = await this.createConnectedClientWithTimeout(config, OPTIONAL_SPLIT_READY_TIMEOUT_MS);
       if (!this.interactiveClient || !this.connectionId || this.isClosing) {
         client.removeAllListeners();
+        client.on('error', () => undefined);
         client.end();
         return;
       }
@@ -4468,6 +4521,7 @@ export class SshSessionManager {
 
     if (this.auxiliaryClient) {
       this.auxiliaryClient.removeAllListeners();
+      this.auxiliaryClient.on('error', () => undefined);
       this.auxiliaryClient.end();
     }
     this.auxiliaryClient = null;

@@ -43,9 +43,17 @@ export interface IdleTransferSource {
 
 export interface IdleTransferSnapshot {
   queuedItems: number;
+  queuedPaths: string[];
   activePath?: string;
   cachedBytes: number;
   cacheLimitBytes: number;
+  manualGroups: IdleTransferGroup[];
+}
+
+export interface IdleTransferGroup {
+  rootPath: string;
+  activePath?: string;
+  queuedPaths: string[];
 }
 
 interface CacheRecord {
@@ -60,6 +68,7 @@ interface TransferItem {
   size: number;
   modifiedAt?: number;
   cache: boolean;
+  groupPath?: string;
 }
 
 function abortError(): Error {
@@ -155,8 +164,10 @@ export class IdleTransferManager {
   private queue: TransferItem[] = [];
   private queuedPaths = new Set<string>();
   private abortController: AbortController | null = null;
+  private activeAbortController: AbortController | null = null;
   private worker: Promise<void> | null = null;
   private activePath: string | undefined;
+  private activeItem: TransferItem | undefined;
   private automaticScanGeneration = 0;
 
   constructor(
@@ -171,11 +182,23 @@ export class IdleTransferManager {
   }
 
   snapshot(): IdleTransferSnapshot {
+    const groups = new Map<string, IdleTransferGroup>();
+    const addToGroup = (item: TransferItem, active = false) => {
+      if (item.cache || !item.groupPath) return;
+      const group = groups.get(item.groupPath) ?? { rootPath: item.groupPath, queuedPaths: [] };
+      if (active) group.activePath = item.remotePath;
+      else group.queuedPaths.push(item.remotePath);
+      groups.set(item.groupPath, group);
+    };
+    for (const item of this.queue) addToGroup(item);
+    if (this.activeItem) addToGroup(this.activeItem, true);
     return {
       queuedItems: this.queue.length,
+      queuedPaths: this.queue.map((item) => item.remotePath),
       activePath: this.activePath,
       cachedBytes: this.cachedBytes,
       cacheLimitBytes: this.cacheLimitBytes,
+      manualGroups: [...groups.values()],
     };
   }
 
@@ -189,6 +212,8 @@ export class IdleTransferManager {
     this.automaticScanGeneration += 1;
     this.abortController?.abort();
     this.abortController = null;
+    this.activeAbortController?.abort();
+    this.activeAbortController = null;
     this.queue = [];
     this.queuedPaths.clear();
     await this.worker?.catch(() => undefined);
@@ -237,11 +262,39 @@ export class IdleTransferManager {
         size: stat.size,
         modifiedAt: stat.modifiedAt,
         cache: false,
+        groupPath: remotePath,
       });
     } else {
-      await this.queueDirectory(remotePath, localPath, signal);
+      await this.queueDirectory(remotePath, localPath, signal, remotePath);
     }
     this.ensureWorker();
+    return this.snapshot();
+  }
+
+  cancel(remotePath: string): IdleTransferSnapshot {
+    const removed = this.queue.filter((item) => item.remotePath === remotePath);
+    this.queue = this.queue.filter((item) => item.remotePath !== remotePath);
+    for (const item of removed) {
+      if (item.cache) {
+        this.reservedCacheBytes = Math.max(0, this.reservedCacheBytes - item.size);
+      }
+      this.queuedPaths.delete(item.remotePath);
+    }
+
+    if (this.activePath === remotePath) {
+      this.activeAbortController?.abort();
+    }
+
+    return this.snapshot();
+  }
+
+  cancelGroup(groupPath: string): IdleTransferSnapshot {
+    for (const item of [...this.queue]) {
+      if (item.groupPath === groupPath) this.cancel(item.remotePath);
+    }
+    if (this.activeItem?.groupPath === groupPath) {
+      this.activeAbortController?.abort();
+    }
     return this.snapshot();
   }
 
@@ -325,7 +378,12 @@ export class IdleTransferManager {
     this.ensureWorker();
   }
 
-  private async queueDirectory(remoteDirectory: string, localDirectory: string, signal: AbortSignal): Promise<void> {
+  private async queueDirectory(
+    remoteDirectory: string,
+    localDirectory: string,
+    signal: AbortSignal,
+    groupPath: string,
+  ): Promise<void> {
     await fs.mkdir(localDirectory, { recursive: true });
     const directories: Array<{ remote: string; local: string }> = [
       { remote: remoteDirectory, local: localDirectory },
@@ -347,6 +405,7 @@ export class IdleTransferManager {
             size: Math.max(0, entry.size ?? 0),
             modifiedAt: entry.modifiedAt,
             cache: false,
+            groupPath,
           });
         }
       }
@@ -390,8 +449,13 @@ export class IdleTransferManager {
     while (this.queue.length > 0 && !signal.aborted) {
       const item = this.queue.shift()!;
       this.activePath = item.remotePath;
+      this.activeItem = item;
+      const activeAbortController = new AbortController();
+      this.activeAbortController = activeAbortController;
+      const abortActiveTransfer = () => activeAbortController.abort();
+      signal.addEventListener('abort', abortActiveTransfer, { once: true });
       try {
-        await this.transferFile(item, signal);
+        await this.transferFile(item, activeAbortController.signal);
         if (item.cache) {
           this.reservedCacheBytes = Math.max(0, this.reservedCacheBytes - item.size);
           this.cacheRecords.set(item.remotePath, {
@@ -406,12 +470,15 @@ export class IdleTransferManager {
           this.reservedCacheBytes = Math.max(0, this.reservedCacheBytes - item.size);
         }
         await fs.rm(`${item.localPath}.part`, { force: true }).catch(() => undefined);
-        if ((error as Error).name === 'AbortError') {
+        if ((error as Error).name === 'AbortError' && signal.aborted) {
           throw error;
         }
       } finally {
+        signal.removeEventListener('abort', abortActiveTransfer);
         this.queuedPaths.delete(item.remotePath);
         this.activePath = undefined;
+        this.activeItem = undefined;
+        this.activeAbortController = null;
       }
     }
   }
@@ -428,6 +495,7 @@ export class IdleTransferManager {
     }
     const partPath = `${item.localPath}.part`;
     const remote = this.source.createReadStream(item.remotePath);
+    const local = createWriteStream(partPath);
     const limiter = new Transform({
       transform: (chunk: Buffer, _encoding, callback) => {
         this.governor
@@ -440,10 +508,11 @@ export class IdleTransferManager {
     const onAbort = () => {
       remote.destroy(abortError());
       limiter.destroy(abortError());
+      local.destroy(abortError());
     };
     signal.addEventListener('abort', onAbort, { once: true });
     try {
-      await pipeline(remote, limiter, createWriteStream(partPath));
+      await pipeline(remote, limiter, local, { signal });
       if (item.size > 0) {
         const stats = await fs.stat(partPath);
         if (stats.size !== item.size) {

@@ -13,6 +13,7 @@ import type {
   FileOperationEvent,
   HostMetricsEvent,
   HostMetricsSnapshot,
+  IdleTransferSnapshot,
   RemoteFileSystemState,
   RemoteDirectoryEntry,
   SavedConnectionSummary,
@@ -433,6 +434,8 @@ export function App() {
   const [tunnelSaveBusy, setTunnelSaveBusy] = useState(false);
   const [busyTunnelIds, setBusyTunnelIds] = useState<Set<string>>(new Set());
   const [fileOperations, setFileOperations] = useState<FileOperationItem[]>([]);
+  const [downloadQueueOpen, setDownloadQueueOpen] = useState(false);
+  const [idleTransferSnapshot, setIdleTransferSnapshot] = useState<IdleTransferSnapshot | null>(null);
   const [conflictDialog, setConflictDialog] = useState<FileConflictDialogState | null>(null);
   const [reconnectTarget, setReconnectTarget] = useState<ReconnectTarget | null>(null);
   const [reconnectBusy, setReconnectBusy] = useState(false);
@@ -503,7 +506,37 @@ export function App() {
     () => tunnelSnapshots.filter((snapshot) => isTunnelRunning(snapshot.state)).length,
     [tunnelSnapshots],
   );
-  const latestFileOperation = useMemo(() => fileOperations[0] ?? null, [fileOperations]);
+  const visibleFileOperations = useMemo(() => {
+    const nonDownloads = fileOperations.filter((operation) => operation.kind !== 'download');
+    const running = nonDownloads.filter((operation) => operation.status === 'running');
+    return running.length > 0 ? running : nonDownloads.slice(-1);
+  }, [fileOperations]);
+  const downloadQueue = useMemo(() => {
+    const downloads = fileOperations.filter((operation) => operation.kind === 'download');
+    const running = downloads.filter((operation) => operation.status === 'running');
+    const operations = running.length > 0 ? running : downloads.slice(-1);
+    const totalItems = operations.reduce((total, operation) => total + operation.totalItems, 0);
+    const completedItems = operations.reduce(
+      (total, operation) => total + operation.completedItems + operation.skippedItems,
+      0,
+    );
+    const totalBytes = operations.reduce((total, operation) => total + (operation.totalBytes ?? 0), 0);
+    const transferredBytes = operations.reduce((total, operation) => total + (operation.transferredBytes ?? 0), 0);
+    const bytesPerSecond = operations.reduce((total, operation) => total + (operation.bytesPerSecond ?? 0), 0);
+    const etaSeconds =
+      bytesPerSecond > 0 && totalBytes > transferredBytes ? (totalBytes - transferredBytes) / bytesPerSecond : undefined;
+
+    return {
+      operations,
+      status: running.length > 0 ? 'running' : operations[0]?.status,
+      completedItems,
+      totalItems,
+      totalBytes,
+      transferredBytes,
+      bytesPerSecond,
+      etaSeconds,
+    };
+  }, [fileOperations]);
   const saveActiveTab = useStableCallback(() => {
     if (!activeTabId) {
       return;
@@ -602,14 +635,50 @@ export function App() {
   useEffect(() => {
     const unsubscribe = window.electronAPI.onFileOperationEvent((event: FileOperationEvent) => {
       setFileOperations((previous) => {
-        const next = previous.filter((item) => item.operationId !== event.operationId);
-        return [event, ...next].slice(0, 6);
+        const index = previous.findIndex((item) => item.operationId === event.operationId);
+        if (index === -1) {
+          return [...previous, event].slice(-6);
+        }
+
+        const next = [...previous];
+        next[index] = event;
+        return next;
       });
-      setStatusMessage(event.error ? event.error : event.message);
+      // Byte-progress events can arrive many times per second and from several
+      // transfers at once. Keeping them out of the shared status text avoids
+      // a layout/content race; each operation renders its own progress below.
+      if (event.status !== 'running') {
+        setStatusMessage(event.error ? event.error : event.message);
+      }
     });
 
     return unsubscribe;
   }, []);
+
+  useEffect(() => {
+    if (connectionStatus.state !== 'connected') {
+      setIdleTransferSnapshot(null);
+      return;
+    }
+
+    let disposed = false;
+    const refresh = () => {
+      void window.electronAPI
+        .getIdleTransferSnapshot()
+        .then((snapshot) => {
+          if (!disposed) {
+            setIdleTransferSnapshot(snapshot);
+          }
+        })
+        .catch(() => undefined);
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 1000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [connectionStatus.state]);
 
   useEffect(() => {
     if (connectionStatus.state !== 'connected' || connectionStatus.filesystemState !== 'ready') {
@@ -1473,6 +1542,11 @@ export function App() {
   }
 
   async function deleteEntry(entry: RemoteDirectoryEntry): Promise<void> {
+    const targetLabel = entry.kind === 'directory' ? `${entry.path} and all of its contents` : entry.path;
+    if (!window.confirm(`Delete ${targetLabel}? This cannot be undone.`)) {
+      return;
+    }
+
     const operationId = crypto.randomUUID();
     retryRequestsRef.current.set(operationId, {
       kind: 'delete',
@@ -1538,8 +1612,10 @@ export function App() {
   }
 
   async function downloadEntry(entry: RemoteDirectoryEntry): Promise<void> {
+    setStatusMessage(`Choose a local destination for ${entry.path}`);
     const downloadDirectory = await window.electronAPI.pickDownloadDirectory();
     if (!downloadDirectory) {
+      setStatusMessage('Download canceled');
       return;
     }
 
@@ -2122,12 +2198,16 @@ export function App() {
       setSelectedTreePath(entry.path);
 
       if (action === 'upload' && entry.kind === 'directory') {
-        void uploadToDirectory(entry.path);
+        void uploadToDirectory(entry.path).catch((error) => {
+          setStatusMessage(getErrorMessage(error, `Unable to upload into ${entry.path}`));
+        });
         return;
       }
 
       if (action === 'download') {
-        void downloadEntry(entry);
+        void downloadEntry(entry).catch((error) => {
+          setStatusMessage(getErrorMessage(error, `Unable to download ${entry.path}`));
+        });
         return;
       }
 
@@ -2137,6 +2217,7 @@ export function App() {
           .queueIdleDownload({ remotePath: entry.path })
           .then((snapshot) => {
             if (snapshot) {
+              setIdleTransferSnapshot(snapshot);
               setStatusMessage(
                 `Idle download queued (${snapshot.queuedItems} item${snapshot.queuedItems === 1 ? '' : 's'} waiting)`,
               );
@@ -2236,6 +2317,33 @@ export function App() {
                   >
                     New Folder
                   </button>
+                  <div className="menu-divider" />
+                  <button
+                    type="button"
+                    className="menu-item"
+                    disabled={!isConnected || !fileSystemReady}
+                    onClick={() => {
+                      void uploadToDirectory(getActionDirectoryPath()).catch((error) => {
+                        setStatusMessage(getErrorMessage(error, 'Unable to upload files'));
+                      });
+                    }}
+                  >
+                    Upload Here…
+                  </button>
+                  <button
+                    type="button"
+                    className="menu-item"
+                    disabled={!isConnected || !fileSystemReady || !selectedEntry}
+                    onClick={() => {
+                      if (selectedEntry) {
+                        void downloadEntry(selectedEntry).catch((error) => {
+                          setStatusMessage(getErrorMessage(error, `Unable to download ${selectedEntry.path}`));
+                        });
+                      }
+                    }}
+                  >
+                    Download Selected…
+                  </button>
                   <button
                     type="button"
                     className="menu-item"
@@ -2247,6 +2355,20 @@ export function App() {
                     }}
                   >
                     Rename
+                  </button>
+                  <button
+                    type="button"
+                    className="menu-item menu-item-danger"
+                    disabled={!isConnected || !fileSystemReady || !selectedEntry}
+                    onClick={() => {
+                      if (selectedEntry) {
+                        void deleteEntry(selectedEntry).catch((error) => {
+                          setStatusMessage(getErrorMessage(error, `Unable to delete ${selectedEntry.path}`));
+                        });
+                      }
+                    }}
+                  >
+                    Delete Selected
                   </button>
                   <div className="menu-divider" />
                   <button
@@ -2271,7 +2393,7 @@ export function App() {
                 </div>
               ) : null}
             </div>
-            <button
+            {downloadQueue.operations.length > 0 ? (<button
               type="button"
               className="menu-button topbar-tool-button"
               disabled={!isConnected}
@@ -2282,7 +2404,7 @@ export function App() {
             >
               <Search size={13} />
               <span>Search</span>
-            </button>
+            </button>) : null}
             <button
               type="button"
               className="menu-button topbar-tool-button"
@@ -2574,56 +2696,155 @@ export function App() {
           <CircleAlert size={14} />
           <span>{statusMessage}</span>
         </div>
-        {latestFileOperation ? (
-          <div className={`statusbar-section statusbar-file-op statusbar-file-op-${latestFileOperation.status}`}>
-            <span>
-              {getFileOperationLabel(latestFileOperation.kind)} {latestFileOperation.completedItems}/{latestFileOperation.totalItems}
-            </span>
-            {latestFileOperation.status === 'running' &&
-            typeof latestFileOperation.totalBytes === 'number' &&
-            latestFileOperation.totalBytes > 0 ? (
-              (() => {
-                const transferred = latestFileOperation.transferredBytes ?? 0;
-                const total = latestFileOperation.totalBytes;
-                const pct = Math.min(100, Math.floor((transferred / total) * 100));
-                const rate = formatRate(latestFileOperation.bytesPerSecond);
-                const eta = formatEta(latestFileOperation.etaSeconds);
-                return (
-                  <div className="statusbar-transfer">
-                    <progress className="statusbar-transfer-bar" max={total} value={transferred} />
-                    <span className="statusbar-transfer-detail">
-                      {pct}% · {formatBytes(transferred)}/{formatBytes(total)}
-                      {rate ? ` · ${rate}` : ''}
-                      {eta ? ` · ETA ${eta}` : ''}
-                    </span>
-                  </div>
-                );
-              })()
-            ) : (
-              <span>{latestFileOperation.error ?? latestFileOperation.message}</span>
-            )}
-            {latestFileOperation.status === 'running' ? (
-              <button
-                type="button"
-                className="status-inline-button"
-                onClick={() => {
-                  void window.electronAPI.cancelFileOperation(latestFileOperation.operationId);
-                }}
-              >
-                Cancel
-              </button>
+        {downloadQueue.operations.length > 0 || (idleTransferSnapshot?.manualGroups.length ?? 0) > 0 ? (
+          <div className="download-queue-control">
+            {downloadQueue.operations.length > 0 ? (
+            <button
+              type="button"
+              className={`statusbar-section statusbar-file-op statusbar-file-op-${downloadQueue.status ?? 'completed'} statusbar-queue-button`}
+              onClick={() => setDownloadQueueOpen((open) => !open)}
+              aria-expanded={downloadQueueOpen}
+            >
+              <span>
+                {downloadQueue.operations.length > 0
+                  ? `Download ${downloadQueue.completedItems}/${downloadQueue.totalItems}`
+                  : 'Downloads'}
+                {(idleTransferSnapshot?.manualGroups.length ?? 0) > 0
+                  ? ` · ${idleTransferSnapshot!.manualGroups.length} idle task${idleTransferSnapshot!.manualGroups.length === 1 ? '' : 's'}`
+                  : ''}
+              </span>
+              {downloadQueue.status === 'running' && downloadQueue.totalBytes > 0 ? (
+                <div className="statusbar-transfer">
+                  <progress
+                    className="statusbar-transfer-bar"
+                    max={downloadQueue.totalBytes}
+                    value={downloadQueue.transferredBytes}
+                  />
+                  <span className="statusbar-transfer-detail">
+                    {Math.min(100, Math.floor((downloadQueue.transferredBytes / downloadQueue.totalBytes) * 100))}% ·{' '}
+                    {formatBytes(downloadQueue.transferredBytes)}/{formatBytes(downloadQueue.totalBytes)}
+                    {formatRate(downloadQueue.bytesPerSecond) ? ` · ${formatRate(downloadQueue.bytesPerSecond)}` : ''}
+                    {formatEta(downloadQueue.etaSeconds) ? ` · ETA ${formatEta(downloadQueue.etaSeconds)}` : ''}
+                  </span>
+                </div>
+              ) : null}
+            </button>
             ) : null}
-            {latestFileOperation.retryable && latestFileOperation.status !== 'running' ? (
-              <button
-                type="button"
-                className="status-inline-button"
-                onClick={() => {
-                  void retryFileOperation(latestFileOperation);
-                }}
-              >
-                Retry
-              </button>
+            {downloadQueueOpen ? (
+              <div className="download-queue-popover" role="dialog" aria-label="Download queue">
+                <div className="download-queue-heading">Download queue</div>
+                <div className="download-queue-list">
+                  {downloadQueue.operations.map((operation) => (
+                    <div key={operation.operationId} className="download-queue-item">
+                      <div className="download-queue-item-copy">
+                        <span className="download-queue-path" title={operation.currentPath ?? operation.sourcePath}>
+                          {operation.currentPath ?? operation.sourcePath}
+                        </span>
+                        <span>
+                          {operation.status === 'running'
+                            ? `Downloading · ${operation.completedItems + operation.skippedItems}/${operation.totalItems}`
+                            : operation.error ?? operation.message}
+                        </span>
+                      </div>
+                      {operation.status === 'running' ? (
+                        <button
+                          type="button"
+                          className="status-inline-button"
+                          onClick={() => {
+                            void window.electronAPI.cancelFileOperation(operation.operationId);
+                          }}
+                        >
+                          Cancel
+                        </button>
+                      ) : null}
+                    </div>
+                  ))}
+                  {idleTransferSnapshot?.manualGroups.map((group) => (
+                    <details key={`idle-group-${group.rootPath}`} className="download-queue-group">
+                      <summary>
+                        <span className="download-queue-path" title={group.rootPath}>{group.rootPath}</span>
+                        <span>
+                          Idle · {group.activePath ? '1 active' : '0 active'}, {group.queuedPaths.length} waiting
+                        </span>
+                        <button
+                          type="button"
+                          className="status-inline-button"
+                          onClick={(event) => {
+                            event.preventDefault();
+                            void window.electronAPI.cancelIdleDownloadGroup(group.rootPath).then(setIdleTransferSnapshot);
+                          }}
+                        >
+                          Cancel all
+                        </button>
+                      </summary>
+                      <div className="download-queue-group-items">
+                        {group.activePath ? <span>{group.activePath} · Downloading</span> : null}
+                        {group.queuedPaths.map((remotePath) => <span key={remotePath}>{remotePath} · Waiting</span>)}
+                      </div>
+                    </details>
+                  ))}
+                </div>
+              </div>
             ) : null}
+          </div>
+        ) : null}
+        {visibleFileOperations.length > 0 ? (
+          <div className="statusbar-file-operations" aria-label="File operations">
+            {visibleFileOperations.map((operation) => (
+              <div
+                key={operation.operationId}
+                className={`statusbar-section statusbar-file-op statusbar-file-op-${operation.status}`}
+              >
+                <span title={operation.currentPath ?? operation.sourcePath}>
+                  {getFileOperationLabel(operation.kind)} {operation.completedItems}/{operation.totalItems}
+                </span>
+                {operation.status === 'running' &&
+                typeof operation.totalBytes === 'number' &&
+                operation.totalBytes > 0 ? (
+                  (() => {
+                    const transferred = operation.transferredBytes ?? 0;
+                    const total = operation.totalBytes;
+                    const pct = Math.min(100, Math.floor((transferred / total) * 100));
+                    const rate = formatRate(operation.bytesPerSecond);
+                    const eta = formatEta(operation.etaSeconds);
+                    return (
+                      <div className="statusbar-transfer">
+                        <progress className="statusbar-transfer-bar" max={total} value={transferred} />
+                        <span className="statusbar-transfer-detail">
+                          {pct}% · {formatBytes(transferred)}/{formatBytes(total)}
+                          {rate ? ` · ${rate}` : ''}
+                          {eta ? ` · ETA ${eta}` : ''}
+                        </span>
+                      </div>
+                    );
+                  })()
+                ) : (
+                  <span>{operation.error ?? operation.message}</span>
+                )}
+                {operation.status === 'running' ? (
+                  <button
+                    type="button"
+                    className="status-inline-button"
+                    onClick={() => {
+                      void window.electronAPI.cancelFileOperation(operation.operationId);
+                    }}
+                  >
+                    Cancel
+                  </button>
+                ) : null}
+                {operation.retryable && operation.status !== 'running' ? (
+                  <button
+                    type="button"
+                    className="status-inline-button"
+                    onClick={() => {
+                      void retryFileOperation(operation);
+                    }}
+                  >
+                    Retry
+                  </button>
+                ) : null}
+              </div>
+            ))}
           </div>
         ) : null}
         <div className="statusbar-section">

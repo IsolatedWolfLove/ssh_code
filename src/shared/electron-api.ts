@@ -49,6 +49,8 @@ import type {
 export interface ElectronApi {
   openNewWindow: () => Promise<void>;
   openExternal: (url: string) => Promise<void>;
+  readClipboardText: () => Promise<string>;
+  writeClipboardText: (text: string) => Promise<void>;
   connect: (input: ConnectInput) => Promise<ConnectResult>;
   connectSaved: (savedConnectionId: string) => Promise<ConnectResult>;
   disconnect: () => Promise<void>;

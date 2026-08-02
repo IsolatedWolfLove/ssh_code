@@ -4,7 +4,7 @@ import { execFile } from 'node:child_process';
 import os from 'node:os';
 import { promisify } from 'node:util';
 
-import { app, BrowserWindow, dialog, ipcMain, screen, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, screen, shell } from 'electron';
 
 import { IPC_CHANNELS } from '../shared/contracts';
 import type {
@@ -201,10 +201,6 @@ function shouldDisableHardwareAcceleration(): boolean {
     return false;
   }
 
-  if (process.env.SSH_STUDIO_AUTO_DISABLE_GPU !== '0') {
-    return true;
-  }
-
   if (process.env.SSH_STUDIO_FORCE_GPU === '1') {
     return false;
   }
@@ -213,7 +209,11 @@ function shouldDisableHardwareAcceleration(): boolean {
     return true;
   }
 
-  return !hasUsableLinuxGpuDevice();
+  if (process.env.SSH_STUDIO_AUTO_DISABLE_GPU === '1') {
+    return !hasUsableLinuxGpuDevice();
+  }
+
+  return false;
 }
 
 if (shouldDisableHardwareAcceleration()) {
@@ -499,6 +499,13 @@ function registerIpc(): void {
     }
 
     await shell.openExternal(nextUrl.toString());
+  });
+  ipcMain.handle(IPC_CHANNELS.clipboardReadText, () => clipboard.readText());
+  ipcMain.handle(IPC_CHANNELS.clipboardWriteText, (_event, text: string) => {
+    if (typeof text !== 'string') {
+      throw new TypeError('Clipboard text must be a string');
+    }
+    clipboard.writeText(text);
   });
   ipcMain.handle(IPC_CHANNELS.connect, async (event, input: ConnectInput) => {
     const savedConnectionId = getSavedConnectionStore().getConnectionId(input);

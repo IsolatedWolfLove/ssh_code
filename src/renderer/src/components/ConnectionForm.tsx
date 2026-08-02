@@ -1,7 +1,11 @@
 import {
   ChevronDown,
   ChevronRight,
+  CircleAlert,
+  Eye,
+  EyeOff,
   Globe,
+  HardDrive,
   KeyRound,
   History,
   LoaderCircle,
@@ -13,6 +17,7 @@ import {
   ScanSearch,
   ShieldCheck,
   Trash2,
+  UserRound,
 } from 'lucide-react';
 import { type ChangeEvent, useState } from 'react';
 
@@ -79,6 +84,7 @@ export function ConnectionForm({
   onDisconnect,
 }: ConnectionFormProps) {
   const [expandedSavedConnectionIds, setExpandedSavedConnectionIds] = useState<Set<string>>(new Set());
+  const [passwordVisible, setPasswordVisible] = useState(false);
 
   function handleField<K extends keyof ConnectInput>(key: K) {
     return (event: ChangeEvent<HTMLInputElement>) => {
@@ -103,6 +109,17 @@ export function ConnectionForm({
       (jumpHost.authMethod === 'password' && jumpHost.password === '') ||
       (jumpHost.authMethod === 'privateKey' && (jumpHost.privateKeyPath ?? '').trim() === '') ||
       (jumpHost.authMethod === 'agent' && (jumpHost.agentSocket ?? '').trim() === ''));
+  const connectDisabled =
+    isBusy ||
+    (authMethod !== 'tailscale' && value.host.trim() === '') ||
+    (authMethod !== 'tailscale' && value.username.trim() === '') ||
+    (authMethod === 'password' && value.password === '') ||
+    (authMethod === 'privateKey' && (value.privateKeyPath ?? '').trim() === '') ||
+    (authMethod === 'agent' && (value.agentSocket ?? '').trim() === '') ||
+    hasInvalidJumpHost ||
+    (authMethod !== 'tailscale' &&
+      hostVerification === 'knownHosts' &&
+      (value.knownHostsPath ?? '').trim() === '');
 
   function toggleSavedConnectionWorkspaces(savedConnectionId: string): void {
     setExpandedSavedConnectionIds((previous) => {
@@ -117,23 +134,44 @@ export function ConnectionForm({
   }
 
   return (
-    <section className={`connection-form connection-form-${mode}`}>
-      <div className="section-heading">
-        <span>Connection</span>
-        <span className={`state-badge state-${status.state}`}>{status.state}</span>
-      </div>
-
+    <form
+      className={`connection-form connection-form-${mode}`}
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (!connectDisabled) onConnect();
+      }}
+    >
       {mode === 'launch' ? (
-        <div className="connection-copy">
-          <h1>Open a remote workspace</h1>
-          <p>Connect once, then work in files and terminal without keeping the login form on screen.</p>
+        <header className="connection-hero">
+          <div className="connection-brand-mark" aria-hidden="true"><HardDrive size={24} /></div>
+          <div className="connection-copy">
+            <span className="connection-eyebrow">SSH Studio</span>
+            <h1>Connect to your workspace</h1>
+            <p>A secure, focused path to your remote files and terminal.</p>
+          </div>
+          <span className={`state-badge state-${status.state}`}><span className="state-dot" />{status.state}</span>
+        </header>
+      ) : (
+        <div className="section-heading">
+          <span>Connection</span>
+          <span className={`state-badge state-${status.state}`}>{status.state}</span>
         </div>
-      ) : null}
+      )}
 
-      <div className="auth-choice-row">
+      <div className={`connection-body connection-body-${mode}`}>
+        <div className="connection-setup-panel">
+          {mode === 'launch' ? (
+            <div className="connection-panel-heading">
+              <div><span className="connection-step">Connection details</span><p>Choose how you want to authenticate.</p></div>
+              <span className="keyboard-hint">Enter to connect</span>
+            </div>
+          ) : null}
+
+      <div className="auth-choice-row" role="group" aria-label="Authentication method">
         <button
           type="button"
           className={`auth-choice-button ${authMethod === 'password' ? 'auth-choice-button-active' : ''}`}
+          aria-pressed={authMethod === 'password'}
           onClick={() => {
             onChange({ ...value, authMethod: 'password' });
           }}
@@ -144,6 +182,7 @@ export function ConnectionForm({
         <button
           type="button"
           className={`auth-choice-button ${authMethod === 'privateKey' ? 'auth-choice-button-active' : ''}`}
+          aria-pressed={authMethod === 'privateKey'}
           onClick={() => {
             onChange({ ...value, authMethod: 'privateKey' });
           }}
@@ -154,6 +193,7 @@ export function ConnectionForm({
         <button
           type="button"
           className={`auth-choice-button ${authMethod === 'agent' ? 'auth-choice-button-active' : ''}`}
+          aria-pressed={authMethod === 'agent'}
           onClick={() => {
             onChange({ ...value, authMethod: 'agent' });
           }}
@@ -164,6 +204,7 @@ export function ConnectionForm({
         <button
           type="button"
           className={`auth-choice-button ${authMethod === 'tailscale' ? 'auth-choice-button-active' : ''}`}
+          aria-pressed={authMethod === 'tailscale'}
           onClick={() => {
             onChange({
               ...value,
@@ -181,7 +222,9 @@ export function ConnectionForm({
         <>
           <label>
             <span>Host</span>
-            <input value={value.host} onChange={handleField('host')} placeholder="10.0.0.23" />
+            <div className="connection-input-shell"><HardDrive size={16} />
+              <input value={value.host} onChange={handleField('host')} placeholder="server.example.com" autoComplete="url" autoFocus={mode === 'launch'} />
+            </div>
           </label>
 
           <div className="field-row">
@@ -192,7 +235,9 @@ export function ConnectionForm({
 
             <label>
               <span>User</span>
-              <input value={value.username} onChange={handleField('username')} placeholder="root" />
+              <div className="connection-input-shell"><UserRound size={16} />
+                <input value={value.username} onChange={handleField('username')} placeholder="root" autoComplete="username" />
+              </div>
             </label>
           </div>
 
@@ -258,12 +303,19 @@ export function ConnectionForm({
       {authMethod === 'password' ? (
         <label>
           <span>Password</span>
-          <input
-            type="password"
-            value={value.password}
-            onChange={handleField('password')}
-            placeholder="SSH password"
-          />
+          <div className="connection-input-shell">
+            <KeyRound size={16} />
+            <input
+              type={passwordVisible ? 'text' : 'password'}
+              value={value.password}
+              onChange={handleField('password')}
+              placeholder="SSH password"
+              autoComplete="current-password"
+            />
+            <button type="button" className="password-toggle" onClick={() => setPasswordVisible((visible) => !visible)} aria-label={passwordVisible ? 'Hide password' : 'Show password'}>
+              {passwordVisible ? <EyeOff size={16} /> : <Eye size={16} />}
+            </button>
+          </div>
         </label>
       ) : null}
 
@@ -331,24 +383,12 @@ export function ConnectionForm({
 
       <div className="connection-actions">
         <button
-          type="button"
+          type="submit"
           className="primary-button"
-          onClick={onConnect}
-          disabled={
-            isBusy ||
-            (authMethod !== 'tailscale' && value.host.trim() === '') ||
-            (authMethod !== 'tailscale' && value.username.trim() === '') ||
-            (authMethod === 'password' && value.password === '') ||
-            (authMethod === 'privateKey' && (value.privateKeyPath ?? '').trim() === '') ||
-            (authMethod === 'agent' && (value.agentSocket ?? '').trim() === '') ||
-            hasInvalidJumpHost ||
-            (authMethod !== 'tailscale' &&
-              hostVerification === 'knownHosts' &&
-              (value.knownHostsPath ?? '').trim() === '')
-          }
+          disabled={connectDisabled}
         >
           {isBusy ? <LoaderCircle className="spin" size={16} /> : <ActionIcon size={16} />}
-          <span>{actionLabel}</span>
+          <span>{isBusy ? 'Connecting…' : actionLabel}</span>
         </button>
 
         {mode === 'compact' ? (
@@ -359,8 +399,16 @@ export function ConnectionForm({
         ) : null}
       </div>
 
+      {status.state === 'error' || status.state === 'connecting' ? (
+        <div className={`connection-feedback connection-feedback-${status.state}`} role={status.state === 'error' ? 'alert' : 'status'}>
+          {status.state === 'error' ? <CircleAlert size={16} /> : <LoaderCircle className="spin" size={16} />}
+          <span>{status.message}</span>
+        </div>
+      ) : null}
+        </div>
+
       {mode === 'launch' ? (
-        <>
+        <aside className="connection-history-panel">
           {authMethod === 'tailscale' ? (
             <section className="saved-connections">
               <div className="section-heading">
@@ -541,8 +589,9 @@ export function ConnectionForm({
               </div>
             )}
           </section>
-        </>
+        </aside>
       ) : null}
-    </section>
+      </div>
+    </form>
   );
 }

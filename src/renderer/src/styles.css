@@ -412,7 +412,6 @@ button {
   place-items: center;
   padding: 24px;
   background: rgba(4, 8, 12, 0.58);
-  backdrop-filter: blur(10px);
 }
 
 .dialog-card {
@@ -1573,7 +1572,6 @@ button {
   background: rgba(10, 15, 22, 0.82);
   color: var(--text-secondary);
   pointer-events: none;
-  backdrop-filter: blur(8px);
 }
 
 .panel-handle {
@@ -1923,6 +1921,48 @@ button {
   border-radius: var(--radius);
   overflow: hidden;
   background: var(--bg-terminal);
+}
+
+.terminal-context-menu {
+  position: absolute;
+  z-index: 30;
+  display: grid;
+  width: 148px;
+  padding: 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #121b25;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.42);
+}
+
+.terminal-context-menu button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  height: 32px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+}
+
+.terminal-context-menu button:hover:not(:disabled) {
+  background: rgba(55, 210, 200, 0.12);
+  color: var(--accent);
+}
+
+.terminal-context-menu button:disabled {
+  color: var(--text-muted);
+  opacity: 0.45;
+}
+
+.terminal-context-menu kbd {
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.5625rem;
 }
 
 .terminal-pane-status {
@@ -2343,9 +2383,201 @@ body { font-synthesis: none; }
 .terminal-panel { background: #0a1017; }
 .statusbar { padding: 0 14px; background: #0b1118; }
 
+/* Launch connection experience */
+.launch-card {
+  width: min(980px, 100%);
+  border-radius: 18px;
+  border-color: rgba(154, 178, 199, 0.2);
+}
+
+.connection-form-launch {
+  padding: 0;
+  gap: 0;
+}
+
+.connection-hero {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 18px;
+  padding: 26px 30px;
+  border-bottom: 1px solid var(--line-soft);
+  background:
+    radial-gradient(circle at 8% 0%, rgba(55, 210, 200, 0.12), transparent 36%),
+    #111a24;
+}
+
+.connection-brand-mark {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border: 1px solid rgba(55, 210, 200, 0.28);
+  border-radius: 15px;
+  background: rgba(55, 210, 200, 0.1);
+  color: var(--accent);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.connection-eyebrow,
+.connection-step {
+  color: var(--accent);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.connection-copy h1 { margin-top: 3px; }
+.connection-copy p { margin-top: 4px; }
+
+.state-badge {
+  gap: 7px;
+}
+
+.state-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 8px currentColor;
+}
+
+.connection-body-launch {
+  display: grid;
+  grid-template-columns: minmax(0, 1.08fr) minmax(320px, 0.92fr);
+  min-height: 430px;
+}
+
+.connection-body-compact { display: contents; }
+
+.connection-setup-panel {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  min-width: 0;
+}
+
+.connection-body-launch .connection-setup-panel,
+.connection-history-panel {
+  display: grid;
+  padding: 26px 30px 30px;
+  align-content: start;
+
+}
+.connection-history-panel {
+  border-left: 1px solid var(--line-soft);
+  background: rgba(7, 12, 18, 0.34);
+}
+
+.connection-panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 2px;
+}
+
+.connection-panel-heading p {
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.keyboard-hint {
+  flex: none;
+  padding: 5px 8px;
+  border: 1px solid var(--line-soft);
+  border-bottom-color: var(--line-strong);
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 0.625rem;
+}
+
+.connection-input-shell {
+  display: flex;
+  align-items: center;
+  height: 42px;
+  padding: 0 11px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: #0b1118;
+  color: var(--text-muted);
+  transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease;
+}
+
+.connection-input-shell:focus-within {
+  border-color: rgba(55, 210, 200, 0.62);
+  background: #0d151d;
+  box-shadow: 0 0 0 3px rgba(55, 210, 200, 0.11);
+  color: var(--accent);
+}
+
+.connection-form .connection-input-shell input {
+  min-width: 0;
+  height: 40px;
+  padding: 0 9px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  flex: 1;
+}
+
+.password-toggle {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  margin-right: -5px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.password-toggle:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-primary);
+}
+
+.connection-form-launch .auth-choice-button { height: 40px; }
+.connection-form-launch .connection-actions { margin-top: 3px; }
+.connection-form-launch .primary-button { height: 44px; border-radius: 9px; }
+
+.connection-feedback {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
+.connection-feedback svg { flex: none; margin-top: 1px; }
+.connection-feedback-error { border-color: rgba(255, 120, 110, 0.25); background: rgba(255, 120, 110, 0.08); color: #ffb7b0; }
+.connection-feedback-connecting { border-color: rgba(255, 179, 71, 0.22); background: rgba(255, 179, 71, 0.07); color: #ffd898; }
+
+.connection-history-panel .saved-connections:first-child { padding-top: 0; border-top: 0; }
+
+@media (max-width: 860px) {
+  .launch-card { width: min(620px, 100%); }
+  .connection-body-launch { grid-template-columns: 1fr; }
+  .connection-history-panel { border-top: 1px solid var(--line-soft); border-left: 0; }
+}
+
 @media (max-width: 640px) {
   .launch-screen { padding: 16px; background-image: none; }
-  .connection-form-launch { padding: 20px; }
+  .connection-form-launch { padding: 0; }
+  .connection-hero { grid-template-columns: auto minmax(0, 1fr); padding: 20px; }
+  .connection-hero .state-badge { display: none; }
+  .connection-brand-mark { width: 44px; height: 44px; border-radius: 12px; }
+  .connection-body-launch .connection-setup-panel,
+  .connection-history-panel { padding: 20px; }
+  .connection-panel-heading { align-items: flex-start; }
+  .keyboard-hint { display: none; }
+  .auth-choice-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .connection-copy h1 { font-size: 1.375rem; }
   .saved-connection-button-label span { display: none; }
 }

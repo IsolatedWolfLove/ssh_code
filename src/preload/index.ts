@@ -6,6 +6,8 @@ import type { ElectronApi } from '../shared/electron-api';
 const electronApi: ElectronApi = {
   openNewWindow: () => ipcRenderer.invoke(IPC_CHANNELS.openNewWindow),
   openExternal: (url) => ipcRenderer.invoke(IPC_CHANNELS.openExternal, url),
+  readClipboardText: () => ipcRenderer.invoke(IPC_CHANNELS.clipboardReadText),
+  writeClipboardText: (text) => ipcRenderer.invoke(IPC_CHANNELS.clipboardWriteText, text),
   connect: (input) => ipcRenderer.invoke(IPC_CHANNELS.connect, input),
   connectSaved: (savedConnectionId) => ipcRenderer.invoke(IPC_CHANNELS.connectSaved, savedConnectionId),
   disconnect: () => ipcRenderer.invoke(IPC_CHANNELS.disconnect),

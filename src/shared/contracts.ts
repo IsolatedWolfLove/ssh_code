@@ -499,6 +499,8 @@ export interface LanguageServerStateEvent {
 export const IPC_CHANNELS = {
   openNewWindow: 'window:openNew',
   openExternal: 'shell:openExternal',
+  clipboardReadText: 'clipboard:readText',
+  clipboardWriteText: 'clipboard:writeText',
   connect: 'ssh:connect',
   connectSaved: 'ssh:connectSaved',
   disconnect: 'ssh:disconnect',

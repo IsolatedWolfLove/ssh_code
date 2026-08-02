@@ -67,6 +67,12 @@ interface TerminalInstanceProps {
   sessionId: string;
 }
 
+interface TerminalContextMenuState {
+  canCopy: boolean;
+  x: number;
+  y: number;
+}
+
 function shellEscape(remotePath: string): string {
   return `'${remotePath.replace(/'/g, `'\\''`)}'`;
 }
@@ -125,6 +131,51 @@ function TerminalInstance({
   const pendingWriteRef = useRef('');
   const pendingWriteFrameRef = useRef<number | null>(null);
   const [ready, setReady] = useState(true);
+  const [contextMenu, setContextMenu] = useState<TerminalContextMenuState | null>(null);
+
+  const copySelection = useCallback(async (): Promise<void> => {
+    const selection = terminalRef.current?.getSelection() ?? '';
+    if (selection === '') {
+      return;
+    }
+
+    try {
+      await window.electronAPI.writeClipboardText(selection);
+    } catch (error) {
+      onStatusMessage(getErrorMessage(error, 'Unable to copy terminal selection'));
+    }
+  }, [onStatusMessage]);
+
+  const pasteClipboard = useCallback(async (): Promise<void> => {
+    if (!readyRef.current) {
+      return;
+    }
+
+    try {
+      const text = await window.electronAPI.readClipboardText();
+      if (text !== '') {
+        terminalRef.current?.paste(text);
+      }
+    } catch (error) {
+      onStatusMessage(getErrorMessage(error, 'Unable to paste into terminal'));
+    }
+  }, [onStatusMessage]);
+
+  useEffect(() => {
+    if (!contextMenu) {
+      return;
+    }
+
+    const closeContextMenu = () => setContextMenu(null);
+    window.addEventListener('blur', closeContextMenu);
+    document.addEventListener('mousedown', closeContextMenu);
+    document.addEventListener('wheel', closeContextMenu, { capture: true });
+    return () => {
+      window.removeEventListener('blur', closeContextMenu);
+      document.removeEventListener('mousedown', closeContextMenu);
+      document.removeEventListener('wheel', closeContextMenu, { capture: true });
+    };
+  }, [contextMenu]);
 
   useEffect(() => {
     const terminal = new Terminal({
@@ -143,6 +194,21 @@ function TerminalInstance({
     });
 
     terminal.attachCustomKeyEventHandler((event) => {
+      const key = event.key.toLowerCase();
+      const terminalClipboardShortcut = event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey;
+      const macClipboardShortcut = event.metaKey && !event.ctrlKey && !event.altKey;
+
+      if (event.type === 'keydown' && (terminalClipboardShortcut || macClipboardShortcut)) {
+        if (key === 'c') {
+          void copySelection();
+          return false;
+        }
+        if (key === 'v') {
+          void pasteClipboard();
+          return false;
+        }
+      }
+
       // Avoid sending printable keys from both keydown and text-input events in Electron.
       if (shouldUseTextInputEvent(event)) {
         return false;
@@ -247,7 +313,7 @@ function TerminalInstance({
       terminalRef.current = null;
       fitAddonRef.current = null;
     };
-  }, [onStatusMessage, registerSink, sessionId]);
+  }, [copySelection, onStatusMessage, pasteClipboard, registerSink, sessionId]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
@@ -282,7 +348,50 @@ function TerminalInstance({
       className={`terminal-instance ${active ? 'terminal-instance-active' : ''}`}
       onMouseDown={onActivate}
     >
-      <div className="terminal-surface" ref={containerRef} />
+      <div
+        className="terminal-surface"
+        ref={containerRef}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          onActivate();
+          const bounds = event.currentTarget.getBoundingClientRect();
+          setContextMenu({
+            canCopy: terminalRef.current?.hasSelection() ?? false,
+            x: Math.min(event.clientX - bounds.left, Math.max(0, bounds.width - 148)),
+            y: Math.min(event.clientY - bounds.top, Math.max(0, bounds.height - 78)),
+          });
+        }}
+      />
+      {contextMenu ? (
+        <div
+          className="terminal-context-menu"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            disabled={!contextMenu.canCopy}
+            onClick={() => {
+              setContextMenu(null);
+              void copySelection();
+            }}
+          >
+            <span>Copy</span>
+            <kbd>Ctrl+Shift+C</kbd>
+          </button>
+          <button
+            type="button"
+            disabled={!ready}
+            onClick={() => {
+              setContextMenu(null);
+              void pasteClipboard();
+            }}
+          >
+            <span>Paste</span>
+            <kbd>Ctrl+Shift+V</kbd>
+          </button>
+        </div>
+      ) : null}
       {!ready ? <div className="terminal-pane-status">Session ended</div> : null}
     </div>
   );

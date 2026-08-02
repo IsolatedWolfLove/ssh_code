@@ -16,7 +16,8 @@ const buildTime = new Date().toISOString();
 const targets = [
   ['linux', 'amd64'], ['linux', 'arm64'], ['darwin', 'amd64'], ['darwin', 'arm64'],
 ];
-const targetSelector = process.env.SERVER_TARGETS || 'linux-amd64';
+const targetArgument = process.argv.find((argument) => argument.startsWith('--targets='));
+const targetSelector = targetArgument?.slice('--targets='.length) || process.env.SERVER_TARGETS || 'linux-amd64';
 const selectedTargets = targetSelector === 'all'
   ? targets
   : targets.filter(([goos, goarch]) => targetSelector.split(',').includes(`${goos}-${goarch}`));

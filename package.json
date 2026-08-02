@@ -1,6 +1,6 @@
 {
   "name": "ssh-studio",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "description": "Desktop SSH client with SFTP file tree, Monaco editor, and integrated terminal.",
   "author": {
@@ -15,7 +15,7 @@
     "build": "npm run typecheck && electron-vite build",
     "preview": "electron-vite preview",
     "server:build": "node scripts/build-server.mjs",
-    "server:build:all": "SERVER_TARGETS=all node scripts/build-server.mjs",
+    "server:build:all": "node scripts/build-server.mjs --targets=all",
     "server:test": "go test ./...",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -65,7 +65,9 @@
       {
         "from": "resources/server",
         "to": "server",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "linux": {

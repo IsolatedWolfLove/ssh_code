@@ -1,7 +1,9 @@
 import path from 'node:path';
+
 import { accessSync, constants, existsSync, readdirSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import os from 'node:os';
+import { readFile } from 'node:fs/promises';
 import { promisify } from 'node:util';
 
 import { app, BrowserWindow, clipboard, dialog, ipcMain, screen, shell } from 'electron';
@@ -32,6 +34,7 @@ import type {
   UploadLocalEntriesInput,
 } from '../shared/contracts';
 import { SavedConnectionStore } from './saved-connections';
+import { parseSshConfig } from './ssh-config';
 import { SshSessionManager } from './ssh-session';
 
 interface WindowSession {
@@ -527,6 +530,9 @@ function registerIpc(): void {
       savedConnectionId,
     };
   });
+  ipcMain.handle(IPC_CHANNELS.savedConnectionInput, (_event, savedConnectionId: string) =>
+    getSavedConnectionStore().getConnectInput(savedConnectionId),
+  );
   ipcMain.handle(IPC_CHANNELS.disconnect, (event) => getSessionManager(event.sender.id).disconnect());
   ipcMain.handle(IPC_CHANNELS.tailscaleHostsList, () => listTailscaleHosts());
   ipcMain.handle(IPC_CHANNELS.savedConnectionsList, () => getSavedConnectionStore().listSummaries());
@@ -539,6 +545,10 @@ function registerIpc(): void {
   ipcMain.handle(IPC_CHANNELS.savedConnectionsUpdateWorkspace, (_event, savedConnectionId: string, workspacePath: string) =>
     getSavedConnectionStore().updateWorkspacePath(savedConnectionId, workspacePath),
   );
+  ipcMain.handle(IPC_CHANNELS.savedConnectionsImportSshConfig, async () => { const homeDirectory = os.homedir(); const sourcePath = path.join(homeDirectory, '.ssh', 'config'); let config: string; try { config = await readFile(sourcePath, 'utf8'); } catch (error) { if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') return { imported: 0, skipped: 0, sourcePath }; throw error; } const entries = parseSshConfig(config, os.userInfo().username, homeDirectory).map((entry) => {
+      if (!process.env.SSH_AUTH_SOCK || (!entry.privateKeyPath && entry.authMethod !== 'agent')) return entry;
+      return { ...entry, authMethod: 'agent' as const, agentSocket: process.env.SSH_AUTH_SOCK, jumpHost: entry.jumpHost ? { ...entry.jumpHost, agentSocket: process.env.SSH_AUTH_SOCK } : undefined };
+    }); const imported = await getSavedConnectionStore().importConnections(entries); return { imported, skipped: entries.length - imported, sourcePath }; });
   ipcMain.handle(IPC_CHANNELS.readDir, (event, remotePath: string) =>
     getSessionManager(event.sender.id).readDir(remotePath),
   );

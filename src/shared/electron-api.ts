@@ -28,6 +28,7 @@ import type {
   RemoteDirectoryEntry,
   RemoteFilePayload,
   SavedConnectionSummary,
+  SshConfigImportResult,
   SaveRemoteFileInput,
   SaveRemoteFileResult,
   SavedTunnelConfig,
@@ -53,12 +54,14 @@ export interface ElectronApi {
   writeClipboardText: (text: string) => Promise<void>;
   connect: (input: ConnectInput) => Promise<ConnectResult>;
   connectSaved: (savedConnectionId: string) => Promise<ConnectResult>;
+  getSavedConnectionInput: (savedConnectionId: string) => Promise<ConnectInput>;
   disconnect: () => Promise<void>;
   listTailscaleHosts: () => Promise<TailscaleHostSummary[]>;
   listSavedConnections: () => Promise<SavedConnectionSummary[]>;
   removeSavedConnection: (savedConnectionId: string) => Promise<void>;
   renameSavedConnection: (savedConnectionId: string, displayName: string) => Promise<void>;
   updateSavedConnectionWorkspace: (savedConnectionId: string, workspacePath: string) => Promise<void>;
+  importSshConfig: () => Promise<SshConfigImportResult>;
   readDir: (remotePath: string) => Promise<RemoteDirectoryEntry[]>;
   readFile: (remotePath: string) => Promise<RemoteFilePayload>;
   readBinaryFile: (input: ReadRemoteBinaryFileInput) => Promise<RemoteBinaryFilePayload>;

@@ -55,6 +55,7 @@ export interface SavedConnectionSummary {
   workspacePaths: string[];
   tunnels: SavedTunnelConfig[];
 }
+export interface SshConfigImportResult { imported: number; skipped: number; sourcePath: string }
 
 export interface TailscaleHostSummary {
   id: string;
@@ -503,12 +504,14 @@ export const IPC_CHANNELS = {
   clipboardWriteText: 'clipboard:writeText',
   connect: 'ssh:connect',
   connectSaved: 'ssh:connectSaved',
+  savedConnectionInput: 'savedConnections:input',
   disconnect: 'ssh:disconnect',
   tailscaleHostsList: 'tailscale:listHosts',
   savedConnectionsList: 'savedConnections:list',
   savedConnectionsRemove: 'savedConnections:remove',
   savedConnectionsRename: 'savedConnections:rename',
   savedConnectionsUpdateWorkspace: 'savedConnections:updateWorkspace',
+  savedConnectionsImportSshConfig: 'savedConnections:importSshConfig',
   readDir: 'sftp:readDir',
   readFile: 'sftp:readFile',
   writeFileAtomic: 'sftp:writeFileAtomic',

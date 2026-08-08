@@ -8,6 +8,7 @@ import {
   HardDrive,
   KeyRound,
   History,
+  Import,
   LoaderCircle,
   LogIn,
   PencilLine,
@@ -47,6 +48,8 @@ interface ConnectionFormProps {
   onConnectSavedWorkspace?: (savedConnectionId: string, workspacePath: string) => void;
   onRemoveSaved?: (savedConnectionId: string) => void;
   onRenameSaved?: (savedConnectionId: string) => void;
+  onImportSshConfig?: () => void;
+  isImportingSshConfig?: boolean;
   onDisconnect: () => void;
 }
 
@@ -81,6 +84,8 @@ export function ConnectionForm({
   onConnectSavedWorkspace,
   onRemoveSaved,
   onRenameSaved,
+  onImportSshConfig,
+  isImportingSshConfig = false,
   onDisconnect,
 }: ConnectionFormProps) {
   const [expandedSavedConnectionIds, setExpandedSavedConnectionIds] = useState<Set<string>>(new Set());
@@ -474,7 +479,7 @@ export function ConnectionForm({
           <section className="saved-connections">
             <div className="section-heading">
               <span>Recent Clients</span>
-              <History size={14} />
+              <div className="section-heading-actions"><button type="button" className="icon-button saved-connection-action" disabled={isBusy || isImportingSshConfig} aria-label="Import SSH config" title="Import SSH config" onClick={() => onImportSshConfig?.()}>{isImportingSshConfig ? <LoaderCircle className="spin" size={16} /> : <Import size={16} />}</button><History size={14} /></div>
             </div>
 
             {isLoadingSavedConnections ? (

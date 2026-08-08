@@ -5,6 +5,7 @@ import path from 'node:path';
 import { safeStorage } from 'electron';
 
 import type { ConnectInput, JumpHostInput, SavedConnectionSummary, SavedTunnelConfig } from '../shared/contracts';
+import type { ImportedSshConnection } from './ssh-config';
 
 const SAVED_CONNECTIONS_FILE = 'saved-connections.json';
 const MAX_SAVED_CONNECTIONS = 12;
@@ -386,6 +387,24 @@ export class SavedConnectionStore {
 
       await this.writeData(nextData);
       return summarizeConnection(nextConnection);
+    });
+  }
+
+  async importConnections(inputs: ImportedSshConnection[]): Promise<number> {
+    return this.runMutation(async (data) => {
+      const now = new Date().toISOString();
+      const existing = new Map(data.connections.map((connection) => [connection.id, connection]));
+      let imported = 0;
+      for (const input of inputs) {
+        const id = this.getConnectionId(input);
+        const previous = existing.get(id);
+        const connection = this.createStoredConnection(input, now, previous);
+        existing.set(id, { ...connection, id, displayName: input.displayName.trim() || previous?.displayName || connection.displayName });
+        imported += 1;
+      }
+      if (imported === 0) return 0;
+      await this.writeData({ version: 1, connections: [...existing.values()].sort(compareByRecentUse) });
+      return imported;
     });
   }
 

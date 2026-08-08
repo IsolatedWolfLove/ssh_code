@@ -697,7 +697,11 @@ export class SshSessionManager {
         recoverable: diagnostic.recoverable,
         authUrl: undefined,
       });
-      throw new Error(`${diagnostic.message}. ${diagnostic.recoveryHint}`);
+      // Keep the driver error available to callers; the diagnostic category is
+      // useful for the UI, but the original text identifies paths, passphrases,
+      // and agent/socket failures that need different recovery actions.
+      const originalMessage = getErrorMessage(error, 'Unknown SSH error');
+      throw new Error(`${diagnostic.message}. ${diagnostic.recoveryHint} (${originalMessage})`);
     }
   }
 

@@ -10,6 +10,7 @@ const electronApi: ElectronApi = {
   writeClipboardText: (text) => ipcRenderer.invoke(IPC_CHANNELS.clipboardWriteText, text),
   connect: (input) => ipcRenderer.invoke(IPC_CHANNELS.connect, input),
   connectSaved: (savedConnectionId) => ipcRenderer.invoke(IPC_CHANNELS.connectSaved, savedConnectionId),
+  getSavedConnectionInput: (savedConnectionId) => ipcRenderer.invoke(IPC_CHANNELS.savedConnectionInput, savedConnectionId),
   disconnect: () => ipcRenderer.invoke(IPC_CHANNELS.disconnect),
   listTailscaleHosts: () => ipcRenderer.invoke(IPC_CHANNELS.tailscaleHostsList),
   listSavedConnections: () => ipcRenderer.invoke(IPC_CHANNELS.savedConnectionsList),
@@ -19,6 +20,7 @@ const electronApi: ElectronApi = {
     ipcRenderer.invoke(IPC_CHANNELS.savedConnectionsRename, savedConnectionId, displayName),
   updateSavedConnectionWorkspace: (savedConnectionId, workspacePath) =>
     ipcRenderer.invoke(IPC_CHANNELS.savedConnectionsUpdateWorkspace, savedConnectionId, workspacePath),
+  importSshConfig: () => ipcRenderer.invoke(IPC_CHANNELS.savedConnectionsImportSshConfig),
   readDir: (remotePath) => ipcRenderer.invoke(IPC_CHANNELS.readDir, remotePath),
   readFile: (remotePath) => ipcRenderer.invoke(IPC_CHANNELS.readFile, remotePath),
   readBinaryFile: (input) => ipcRenderer.invoke(IPC_CHANNELS.readBinaryFile, input),

@@ -400,6 +400,7 @@ export function App() {
   const [isLoadingSavedConnections, setIsLoadingSavedConnections] = useState(true);
   const [activeSavedConnectionId, setActiveSavedConnectionId] = useState<string | null>(null);
   const [removingSavedConnectionId, setRemovingSavedConnectionId] = useState<string | null>(null);
+  const [isImportingSshConfig, setIsImportingSshConfig] = useState(false);
   const [rootPath, setRootPath] = useState('/');
   const [workspacePath, setWorkspacePath] = useState('/');
   const [entriesByDirectory, setEntriesByDirectory] = useState<Record<string, RemoteDirectoryEntry[]>>({});
@@ -908,8 +909,9 @@ export function App() {
     setActiveSavedConnectionId(null);
     setStatusMessage(`Connecting to ${nextForm.host}:${nextForm.port}...`);
 
+    let matchingSavedConnection: SavedConnectionSummary | null = null;
     try {
-      const matchingSavedConnection = findMatchingSavedConnection(nextForm);
+      matchingSavedConnection = findMatchingSavedConnection(nextForm);
       const result = await window.electronAPI.connect(nextForm);
       const nextSavedConnectionId = result.savedConnectionId ?? matchingSavedConnection?.id ?? null;
       setCurrentSavedConnectionId(nextSavedConnectionId);
@@ -959,7 +961,17 @@ export function App() {
       );
       void loadSavedConnections(true);
     } catch (error) {
-      setStatusMessage(getErrorMessage(error, 'Unable to connect'));
+      const message = getErrorMessage(error, 'Unable to connect');
+      if (/private key|passphrase/i.test(message)) {
+    try {
+          const savedInput = await window.electronAPI.getSavedConnectionInput(savedConnection.id);
+          const passphrase = window.prompt('Enter SSH private key passphrase (leave blank if none):', '');
+          if (passphrase !== null) {
+            setConnectionForm({ ...savedInput, passphrase });
+            setStatusMessage('Passphrase filled in. Press Connect to retry.');
+          } else setStatusMessage(message);
+        } catch { setStatusMessage(message); }
+      } else setStatusMessage(message);
     } finally {
       setBusyAction(null);
       setActiveSavedConnectionId(null);
@@ -1072,6 +1084,19 @@ export function App() {
     }
   }
 
+  async function importSshConfig(): Promise<void> {
+    setIsImportingSshConfig(true);
+    try {
+      const result = await window.electronAPI.importSshConfig();
+      await loadSavedConnections(true);
+      setStatusMessage(result.imported > 0 ? `Imported ${result.imported} SSH host${result.imported === 1 ? '' : 's'}` : `No new SSH hosts found in ${result.sourcePath}`);
+    } catch (error) {
+      setStatusMessage(getErrorMessage(error, 'Unable to import SSH config'));
+    } finally {
+      setIsImportingSshConfig(false);
+    }
+  }
+
   function openRenameSavedConnectionDialog(savedConnectionId: string): void {
     const savedConnection = savedConnections.find((entry) => entry.id === savedConnectionId);
     if (!savedConnection) {
@@ -1156,7 +1181,7 @@ export function App() {
         return next;
       });
 
-      try {
+    try {
         const entries = await window.electronAPI.readDir(remotePath);
         startTransition(() => {
           setEntriesByDirectory((previous) => ({
@@ -2516,6 +2541,10 @@ export function App() {
               onRenameSaved={(savedConnectionId) => {
                 openRenameSavedConnectionDialog(savedConnectionId);
               }}
+              onImportSshConfig={() => {
+                void importSshConfig();
+              }}
+              isImportingSshConfig={isImportingSshConfig}
               onDisconnect={() => {
                 void disconnect();
               }}

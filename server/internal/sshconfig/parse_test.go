@@ -1,6 +1,7 @@
 package sshconfig
 
 import (
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -23,7 +24,7 @@ func TestParse_SimpleHostBlock(t *testing.T) {
 			Port:             2222,
 			Username:         "alice",
 			AuthMethod:       "privateKey",
-			PrivateKeyPath:   "/home/alice/.ssh/id_rsa",
+			PrivateKeyPath:   filepath.Join("/home/alice", ".ssh", "id_rsa"),
 			HostVerification: "off",
 		},
 	}
@@ -197,7 +198,7 @@ func TestParse_KnownHostsFileEnablesHostVerification(t *testing.T) {
 	if got[0].HostVerification != "knownHosts" {
 		t.Fatalf("HostVerification = %q, want knownHosts", got[0].HostVerification)
 	}
-	if got[0].KnownHostsPath != "/home/alice/.ssh/known_hosts" {
+	if got[0].KnownHostsPath != filepath.Join("/home/alice", ".ssh", "known_hosts") {
 		t.Fatalf("KnownHostsPath = %q, want /home/alice/.ssh/known_hosts", got[0].KnownHostsPath)
 	}
 }
@@ -296,7 +297,7 @@ func TestExpandHome(t *testing.T) {
 		want  string
 	}{
 		{"bare tilde", "~", "/home/alice"},
-		{"tilde slash", "~/.ssh/id_rsa", "/home/alice/.ssh/id_rsa"},
+		{"tilde slash", "~/.ssh/id_rsa", filepath.Join("/home/alice", ".ssh", "id_rsa")},
 		{"no tilde", "/etc/ssh/id_rsa", "/etc/ssh/id_rsa"},
 		{"percent d token", "%d/.ssh/id_rsa", "/home/alice/.ssh/id_rsa"},
 		{"percent h token", "/keys/%h", "/keys/example.com"},

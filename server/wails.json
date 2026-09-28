@@ -15,7 +15,7 @@
   "info": {
     "companyName": "IsolatedWolfLove",
     "productName": "SSH Studio",
-    "productVersion": "1.0.0",
+    "productVersion": "1.0.1",
     "copyright": "Copyright IsolatedWolfLove",
     "comments": "SSH workspace built with Go and Wails"
   }

@@ -72,6 +72,7 @@ func TestBuildClientConfigPrivateKeyMissingPath(t *testing.T) {
 }
 
 func TestBuildClientConfigAgentMissingSocket(t *testing.T) {
+	t.Setenv("SSH_AUTH_SOCK", "")
 	_, err := buildClientConfig(ConnectInput{
 		Host:       "example.com",
 		Port:       22,

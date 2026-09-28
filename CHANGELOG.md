@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.1
+
+- Isolate SSH Agent tests from the runner environment on macOS.
+- Use native local-path expectations in SSH configuration tests on Windows.
+- Report Go test failures in GitHub Actions annotations for easier diagnosis.
+
 ## 1.0.0
 
 - Switch the default desktop runtime from Electron to Go and Wails; retain the React/TypeScript interface.

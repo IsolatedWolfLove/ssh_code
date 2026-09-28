@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.0
+
+- Make Recent Clients use Tailscale SSH when Tailscale authentication is selected, and show each saved connection's authentication method.
+- Keep existing saved connections intact when importing overlapping SSH config hosts.
+- Replace the default app icon with an SSH Studio terminal and remote-connection mark across desktop packages and the interface.
+
 ## 1.0.1
 
 - Isolate SSH Agent tests from the runner environment on macOS.

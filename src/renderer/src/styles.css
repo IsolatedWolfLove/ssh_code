@@ -2419,6 +2419,12 @@ body { font-synthesis: none; }
   box-shadow: inset 0 1px rgba(255, 255, 255, 0.08);
 }
 
+.connection-brand-mark img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
 .connection-eyebrow,
 .connection-step {
   color: var(--accent);

@@ -18,7 +18,7 @@ if (target === 'deb') {
   const arch = process.arch === 'arm64' ? 'arm64' : 'amd64';
   for (const p of ['DEBIAN', 'usr/bin', 'usr/share/applications', 'usr/share/icons/hicolor/256x256/apps']) await mkdir(join(stage, p), { recursive: true });
   await copyFile(join(root, 'server/build/bin/ssh-studio'), join(stage, 'usr/bin/ssh-studio'));
-  await copyFile(join(root, 'server/build/appicon.png'), join(stage, 'usr/share/icons/hicolor/256x256/apps/ssh-studio.png'));
+  await copyFile(join(root, 'src/renderer/public/icon.png'), join(stage, 'usr/share/icons/hicolor/256x256/apps/ssh-studio.png'));
   await writeFile(join(stage, 'DEBIAN/control'), `Package: ssh-studio\nVersion: ${pkg.version}\nArchitecture: ${arch}\nMaintainer: ${pkg.author.name} <${pkg.author.email}>\nDepends: libgtk-3-0, libwebkit2gtk-4.1-0\nSection: devel\nPriority: optional\nDescription: SSH client, file editor and terminal\n`);
   await writeFile(join(stage, 'usr/share/applications/ssh-studio.desktop'), '[Desktop Entry]\nType=Application\nName=SSH Studio\nExec=ssh-studio\nIcon=ssh-studio\nTerminal=false\nCategories=Development;Network;\n');
   run('dpkg-deb', ['--root-owner-group', '--build', stage, join(release, `ssh-studio-${pkg.version}-${arch}.deb`)]);

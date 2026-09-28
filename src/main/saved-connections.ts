@@ -397,9 +397,9 @@ export class SavedConnectionStore {
       let imported = 0;
       for (const input of inputs) {
         const id = this.getConnectionId(input);
-        const previous = existing.get(id);
-        const connection = this.createStoredConnection(input, now, previous);
-        existing.set(id, { ...connection, id, displayName: input.displayName.trim() || previous?.displayName || connection.displayName });
+        if (existing.has(id)) continue;
+        const connection = this.createStoredConnection(input, now);
+        existing.set(id, { ...connection, displayName: input.displayName.trim() || connection.displayName });
         imported += 1;
       }
       if (imported === 0) return 0;

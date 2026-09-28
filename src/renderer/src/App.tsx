@@ -903,7 +903,7 @@ export function App() {
     }
   }, [tabs, autoSaveEnabled, currentConnectionId]);
 
-  async function connect(override?: ConnectInput): Promise<void> {
+  async function connect(override?: ConnectInput, preferredWorkspacePath?: string): Promise<void> {
     const nextForm = override ?? connectionForm;
     const previousConnectionId = reconnectTarget?.previousConnectionId ?? currentConnectionId;
     const previousActiveTab = activeTab;
@@ -916,6 +916,7 @@ export function App() {
       matchingSavedConnection = findMatchingSavedConnection(nextForm);
       const result = await api.connect(nextForm);
       const nextSavedConnectionId = result.savedConnectionId ?? matchingSavedConnection?.id ?? null;
+      const workspacePath = preferredWorkspacePath ?? matchingSavedConnection?.workspacePaths[0] ?? matchingSavedConnection?.lastWorkspacePath;
       setCurrentSavedConnectionId(nextSavedConnectionId);
       setConnectionForm((previous) => ({ ...previous, password: '', passphrase: '' }));
       setTabs((previous) => remapTabsToConnection(previous, previousConnectionId, result.connectionId));
@@ -925,11 +926,11 @@ export function App() {
       if (nextSavedConnectionId) {
         setReconnectTarget({
           savedConnectionId: nextSavedConnectionId,
-          workspacePath: matchingSavedConnection?.workspacePaths[0] ?? matchingSavedConnection?.lastWorkspacePath,
+          workspacePath,
           previousConnectionId: result.connectionId,
         });
       }
-      void initializeRemoteState(result, matchingSavedConnection?.workspacePaths[0] ?? matchingSavedConnection?.lastWorkspacePath);
+      void initializeRemoteState(result, workspacePath);
       void loadSavedConnections(true);
     } catch (error) {
       setStatusMessage(getErrorMessage(error, 'Unable to connect'));
@@ -938,7 +939,26 @@ export function App() {
     }
   }
 
-  async function connectSaved(savedConnection: SavedConnectionSummary, preferredWorkspacePath?: string): Promise<void> {
+  async function connectSaved(savedConnection: SavedConnectionSummary, preferredWorkspacePath?: string, useSelectedAuth = false): Promise<void> {
+    if (useSelectedAuth && connectionForm.authMethod === 'tailscale') {
+      const tailscaleInput: ConnectInput = {
+        ...connectionForm,
+        host: savedConnection.host,
+        port: 22,
+        username: savedConnection.username,
+        authMethod: 'tailscale',
+        hostVerification: 'off',
+        password: '',
+        privateKeyPath: '',
+        passphrase: '',
+        agentSocket: '',
+        jumpHost: undefined,
+      };
+      setConnectionForm(tailscaleInput);
+      await connect(tailscaleInput, preferredWorkspacePath);
+      return;
+    }
+
     const previousConnectionId = reconnectTarget?.previousConnectionId ?? currentConnectionId;
     const previousActiveTab = activeTab;
     setBusyAction('connecting');
@@ -2533,7 +2553,7 @@ export function App() {
                   return;
                 }
 
-                void connectSaved(savedConnection);
+                void connectSaved(savedConnection, undefined, true);
               }}
               onConnectSavedWorkspace={(savedConnectionId, workspacePath) => {
                 const savedConnection = savedConnections.find((entry) => entry.id === savedConnectionId);
@@ -2541,7 +2561,7 @@ export function App() {
                   return;
                 }
 
-                void connectSaved(savedConnection, workspacePath);
+                void connectSaved(savedConnection, workspacePath, true);
               }}
               onRemoveSaved={(savedConnectionId) => {
                 void removeSavedConnection(savedConnectionId);

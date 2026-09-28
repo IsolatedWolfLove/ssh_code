@@ -65,6 +65,15 @@ function formatLastConnectedAt(value: string): string {
   }).format(timestamp);
 }
 
+function formatAuthMethod(method: SavedConnectionSummary['authMethod']): string {
+  switch (method) {
+    case 'privateKey': return 'SSH Key';
+    case 'agent': return 'Agent';
+    case 'tailscale': return 'Tailscale SSH';
+    default: return 'Password';
+  }
+}
+
 export function ConnectionForm({
   value,
   status,
@@ -148,7 +157,7 @@ export function ConnectionForm({
     >
       {mode === 'launch' ? (
         <header className="connection-hero">
-          <div className="connection-brand-mark" aria-hidden="true"><HardDrive size={24} /></div>
+          <div className="connection-brand-mark" aria-hidden="true"><img src="./icon.png" alt="" /></div>
           <div className="connection-copy">
             <span className="connection-eyebrow">SSH Studio</span>
             <h1>Connect to your workspace</h1>
@@ -513,11 +522,11 @@ export function ConnectionForm({
                           <div className="saved-connection-copy">
                             <strong>{primaryLabel}</strong>
                             <span>{secondaryLabel}</span>
-                            <span>Last connected {formatLastConnectedAt(savedConnection.lastConnectedAt)}</span>
+                            <span>{formatAuthMethod(savedConnection.authMethod)} • Last connected {formatLastConnectedAt(savedConnection.lastConnectedAt)}</span>
                           </div>
                           <span className="saved-connection-button-label">
                             {isConnectingSaved ? <LoaderCircle className="spin" size={16} /> : <LogIn size={16} />}
-                            <span>{isConnectingSaved ? 'Connecting' : 'Connect'}</span>
+                            <span>{isConnectingSaved ? 'Connecting' : authMethod === 'tailscale' ? 'Tailscale Connect' : 'Connect'}</span>
                           </span>
                         </button>
 

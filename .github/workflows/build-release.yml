@@ -63,7 +63,7 @@ jobs:
         working-directory: server
         run: |
           go mod verify
-          go test ./... -timeout=180s
+          node ../scripts/test-go.mjs
       - name: Check Go race conditions
         if: runner.os == 'Linux'
         working-directory: server

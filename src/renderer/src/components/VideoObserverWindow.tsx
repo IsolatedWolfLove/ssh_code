@@ -1,3 +1,4 @@
+import api from '../lib/api';
 import { useEffect, useRef, useState } from 'react';
 
 import type { VideoFrameEvent, VideoStreamStateEvent } from '../../../shared/contracts';
@@ -16,7 +17,7 @@ export function VideoObserverWindow({ streamId }: VideoObserverWindowProps) {
   const lastContentSizeRef = useRef<string>('');
 
   useEffect(() => {
-    const unsubscribeFrame = window.electronAPI.onVideoFrame((event: VideoFrameEvent) => {
+    const unsubscribeFrame = api.onVideoFrame((event: VideoFrameEvent) => {
       if (event.streamId !== streamId) {
         return;
       }
@@ -32,7 +33,7 @@ export function VideoObserverWindow({ streamId }: VideoObserverWindowProps) {
       }
     });
 
-    const unsubscribeState = window.electronAPI.onVideoStreamState((event: VideoStreamStateEvent) => {
+    const unsubscribeState = api.onVideoStreamState((event: VideoStreamStateEvent) => {
       if (event.streamId !== streamId) {
         return;
       }
@@ -78,7 +79,9 @@ export function VideoObserverWindow({ streamId }: VideoObserverWindowProps) {
     }
 
     lastContentSizeRef.current = key;
-    void window.electronAPI.resizeVideoObserver(streamId, width, height).catch(() => undefined);
+    if (!(window as unknown as { go?: unknown }).go) {
+      void api.resizeVideoObserver(streamId, width, height).catch(() => undefined);
+    }
   }
 
   return (

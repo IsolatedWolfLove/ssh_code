@@ -3012,3 +3012,7 @@ body { font-synthesis: none; }
   height: auto;
   image-rendering: pixelated;
 }
+
+.wails-video-overlay { position: fixed; inset: 10%; z-index: 1500; display: flex; flex-direction: column; background: #111827; border: 1px solid #475569; border-radius: 8px; overflow: hidden; box-shadow: 0 12px 50px #0009; }
+.wails-video-overlay > button { align-self: flex-end; margin: 8px; }
+.wails-video-overlay .video-observer-window { flex: 1; min-height: 0; }

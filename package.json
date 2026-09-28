@@ -1,6 +1,6 @@
 {
   "name": "ssh-studio",
-  "version": "0.2.5",
+  "version": "1.0.0",
   "private": true,
   "description": "Desktop SSH client with SFTP file tree, Monaco editor, and integrated terminal.",
   "author": {
@@ -11,18 +11,21 @@
   "type": "module",
   "main": "out/main/index.js",
   "scripts": {
-    "dev": "electron-vite dev",
-    "build": "npm run typecheck && electron-vite build",
-    "preview": "electron-vite preview",
-    "server:build": "node scripts/build-server.mjs",
-    "server:build:all": "node scripts/build-server.mjs --targets=all",
-    "server:test": "go test ./...",
+    "dev": "node scripts/wails.mjs dev",
+    "build": "npm run typecheck && node scripts/wails.mjs build",
+    "preview": "node scripts/wails.mjs dev",
+    "build:wails-frontend": "vite build -c src/renderer/vite.wails.config.ts",
+    "server:build": "node scripts/wails.mjs build",
+    "server:test": "node scripts/wails.mjs test",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "package:deb": "npm run server:build:all && npm run build && electron-builder --linux deb --x64 --publish never",
-    "package:mac": "npm run server:build:all && npm run build && electron-builder --mac --x64 --arm64 --publish never",
-    "package:win": "npm run server:build:all && npm run build && electron-builder --win nsis --x64 --publish never",
-    "package": "npm run server:build:all && npm run build && electron-builder --publish never"
+    "package:deb": "npm run typecheck && node scripts/package-wails.mjs deb",
+    "package:mac": "npm run typecheck && node scripts/package-wails.mjs mac",
+    "package:win": "npm run typecheck && node scripts/package-wails.mjs win",
+    "package": "npm run typecheck && node scripts/package-wails.mjs",
+    "dev:electron": "electron-vite dev",
+    "build:electron": "npm run typecheck && electron-vite build",
+    "dev:wails-frontend": "vite -c src/renderer/vite.wails.config.ts --host 127.0.0.1 --port 5173 --strictPort"
   },
   "dependencies": {
     "ssh2": "^1.16.0",

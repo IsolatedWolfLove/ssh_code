@@ -2,7 +2,7 @@
 
 Language: English | [中文](README.zh-CN.md)
 
-SSH Studio is a desktop SSH workspace for working on remote machines without bouncing between a terminal, SFTP client, and editor. It combines SSH connection history, an SFTP file explorer, Monaco-based remote editing, workspace search, integrated terminals, SSH tunnels, and optional remote screen observation in one Electron app.
+SSH Studio is a desktop SSH workspace for working on remote machines without bouncing between a terminal, SFTP client, and editor. It combines SSH connection history, an SFTP file explorer, Monaco-based remote editing, workspace search, integrated terminals, SSH tunnels, and optional remote screen observation in a Go/Wails desktop app.
 
 ## Highlights
 
@@ -12,7 +12,7 @@ SSH Studio is a desktop SSH workspace for working on remote machines without bou
 - Save recent connections with editable names and remembered remote workspaces.
 - Browse remote folders over SFTP, then open any folder as the active workspace.
 - Create, rename, delete, upload, and download remote files or folders.
-- Transfer large files with a live progress bar (percent, throughput, ETA), a cancel button, and automatic byte-level resume: an interrupted upload or download picks up from where it stopped instead of restarting, using a temporary `.part` file that is swapped into place only once complete.
+- Transfer large files with a live progress bar (percent, throughput, ETA), a cancel button, and automatic byte-level resume: an interrupted upload or download picks up from where it stopped instead of restarting, using a temporary `.sshstudio-part` file that is swapped into place only once complete.
 - Edit remote files in Monaco with tabs, language detection, dirty-state markers, manual save, and autosave.
 - Use remote TypeScript/JavaScript completion, hover, diagnostics, and go-to-definition when a language server is installed in the workspace or remote PATH.
 - Save files through a temporary-file write plus remote rename/fallback replacement path.
@@ -24,7 +24,7 @@ SSH Studio is a desktop SSH workspace for working on remote machines without bou
 - Keep terminal working directories aligned with the current workspace.
 - Store quick commands locally and launch them in a fresh workspace terminal.
 - Manage local, remote, and dynamic SSH tunnels from saved connections.
-- Use Vision Mode to start a remote virtual display and observe it through a separate video window.
+- Use Vision Mode to start a remote virtual display and observe it through a video panel.
 
 ## Workflow
 
@@ -43,7 +43,7 @@ SSH Studio is a desktop SSH workspace for working on remote machines without bou
 - Optional remote `nvidia-smi` for GPU metrics; CPU, memory and disk are read from `/proc` and `df`.
 - Optional remote `typescript-language-server` and `typescript` for TypeScript/JavaScript language intelligence.
 - Optional remote `Xvfb` and `ffmpeg` with X11 capture support for Vision Mode.
-- Go 1.20+ for building all remote server platform assets.
+- Go 1.26.6+ for the desktop backend. Linux builds need `libgtk-3-dev` and `libwebkit2gtk-4.1-dev`; Windows uses WebView2; macOS needs Xcode command line tools.
 
 ## Development
 
@@ -52,13 +52,14 @@ npm install
 npm run dev
 ```
 
-Build the local Linux server asset during development with `npm run server:build`. Release packaging builds the Linux and macOS x64/arm64 assets with `npm run server:build:all`. The server uses the SSH stdio channel and does not open a remote TCP port.
+`npm run dev` starts Wails; `npm run build` creates `server/build/bin/ssh-studio` (`.exe` on Windows, `.app` on macOS). Scripts run a pinned Wails CLI without a separate installation. Set `GO=/path/to/go` to select Go. React/TypeScript remains the frontend; SSH and the desktop backend run in Go. Legacy Electron code is retained for regression comparison via `dev:electron` / `build:electron`; default builds and releases use Wails.
 
 ## Quality Checks
 
 ```bash
 npm run typecheck
 npm test
+npm run server:test
 npm run build
 ```
 
@@ -67,10 +68,11 @@ npm run build
 ```bash
 npm run package
 npm run package:deb
+npm run package:mac
 npm run package:win
 ```
 
-Build artifacts are written to `release/`.
+Installers are written to `release/`. Package on the target OS: Linux creates deb, macOS creates dmg/zip, and Windows creates an NSIS installer.
 
 ## Shortcuts
 
@@ -86,7 +88,7 @@ Build artifacts are written to `release/`.
 
 ## Data and Security
 
-Successful SSH connections are stored in the Electron user data directory. Passwords and private-key passphrases are encrypted with Electron `safeStorage` when the platform supports it; otherwise SSH Studio stores a base64 compatibility fallback, which is not equivalent to encryption. Quick commands are stored in renderer `localStorage`.
+Connections are stored under `ssh-studio` in the system configuration directory. Passwords and passphrases use AES-GCM with a local `store.key` (Unix mode 0600). First launch attempts to import legacy Electron connections; passwords encrypted by Electron `safeStorage` must be entered again. Quick commands remain in renderer `localStorage`; legacy Electron renderer preferences are not automatically migrated.
 
 Host verification can use a `known_hosts` file. Turning host verification off is useful for disposable development hosts, but it removes SSH host identity checks.
 
@@ -97,20 +99,22 @@ SSH Studio first tries to run `rg` on the remote host for fast JSON search outpu
 ## Project Layout
 
 ```text
-src/main/        Electron main process, SSH sessions, SFTP, tunnels, packaging hooks
-src/preload/     Safe renderer-to-main API bridge
-src/renderer/    React UI, Monaco editor, terminal panels, dialogs
-src/shared/      IPC contracts shared by main, preload, and renderer
-build/           Installer resources
-release/         Generated packages and unpacked builds
+server/app/       Wails API and connection lifecycle
+server/internal/  Go SSH, filesystem, tunnels, terminal, LSP and media modules
+server/main.go    Native desktop entry point
+src/renderer/     React UI, Monaco, xterm.js and Wails bridge
+src/shared/       TypeScript API contracts
+src/main/         Legacy Electron implementation and regression tests
+scripts/          Native build and packaging commands
+release/          Generated installers
 ```
 
 ## Tech Stack
 
-- Electron and electron-vite
+- Go and Wails v2
 - React 19 and TypeScript
 - Monaco Editor
 - xterm.js
-- `ssh2`
+- `golang.org/x/crypto/ssh` and `github.com/pkg/sftp`
 - `react-resizable-panels`
 - lucide-react

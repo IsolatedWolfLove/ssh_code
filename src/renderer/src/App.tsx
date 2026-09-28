@@ -1,3 +1,4 @@
+import { VideoObserverWindow } from './components/VideoObserverWindow';
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
 import { Camera, Check, ChevronDown, CircleAlert, Copy, ExternalLink, FolderSearch, PlugZap, RefreshCw, Search, Download, Upload, Trash2, PencilLine, TerminalSquare, X } from 'lucide-react';
 import { Suspense, lazy, startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -38,6 +39,7 @@ import { SearchDialog } from './components/SearchDialog';
 import { TerminalPanel, type TerminalPanelHandle } from './components/TerminalPanel';
 import { TunnelsDialog } from './components/TunnelsDialog';
 import { useRemoteLanguageServer } from './use-remote-language-server';
+import api from './lib/api';
 
 const RemoteEditor = lazy(() => import('./components/RemoteEditor'));
 
@@ -547,7 +549,7 @@ export function App() {
   });
 
   useEffect(() => {
-    const unsubscribe = window.electronAPI.onConnectionState((payload: ConnectionStatePayload) => {
+    const unsubscribe = api.onConnectionState((payload: ConnectionStatePayload) => {
       setConnectionStatus(payload);
       setStatusMessage(payload.message);
 
@@ -613,7 +615,7 @@ export function App() {
   }, [currentConnectionId, currentSavedConnectionId, workspacePath]);
 
   useEffect(() => {
-    const unsubscribe = window.electronAPI.onTunnelEvent((event: TunnelEvent) => {
+    const unsubscribe = api.onTunnelEvent((event: TunnelEvent) => {
       setTunnelSnapshots((previous) =>
         previous.map((snapshot) =>
           snapshot.config.id === event.state.id
@@ -634,7 +636,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const unsubscribe = window.electronAPI.onFileOperationEvent((event: FileOperationEvent) => {
+    const unsubscribe = api.onFileOperationEvent((event: FileOperationEvent) => {
       setFileOperations((previous) => {
         const index = previous.findIndex((item) => item.operationId === event.operationId);
         if (index === -1) {
@@ -664,7 +666,7 @@ export function App() {
 
     let disposed = false;
     const refresh = () => {
-      void window.electronAPI
+      void api
         .getIdleTransferSnapshot()
         .then((snapshot) => {
           if (!disposed) {
@@ -737,7 +739,7 @@ export function App() {
       ),
     );
 
-    void window.electronAPI.updateSavedConnectionWorkspace(currentSavedConnectionId, nextWorkspacePath).catch(() => {
+    void api.updateSavedConnectionWorkspace(currentSavedConnectionId, nextWorkspacePath).catch(() => {
       // Keep workspace persistence best-effort so navigation stays responsive.
     });
   }, [connectionStatus.state, currentSavedConnectionId, workspacePath]);
@@ -780,7 +782,7 @@ export function App() {
   }, [connectionStatus.state, currentSavedConnectionId, saveActiveTab, showConnectionScreen]);
 
   useEffect(() => {
-    const unsubscribe = window.electronAPI.onHostMetrics((event: HostMetricsEvent) => {
+    const unsubscribe = api.onHostMetrics((event: HostMetricsEvent) => {
       // Snapshots from a previous connection would otherwise linger after a
       // reconnect and describe the wrong host.
       if (currentConnectionId && event.connectionId !== currentConnectionId) {
@@ -806,12 +808,12 @@ export function App() {
       return;
     }
 
-    void window.electronAPI.startHostMetrics(workspacePath, HOST_METRICS_INTERVAL_MS).catch(() => {
+    void api.startHostMetrics(workspacePath, HOST_METRICS_INTERVAL_MS).catch(() => {
       // A failed start just leaves the strip in its unavailable state.
     });
 
     return () => {
-      void window.electronAPI.stopHostMetrics().catch(() => undefined);
+      void api.stopHostMetrics().catch(() => undefined);
     };
   }, [connectionStatus.state, currentConnectionId, workspacePath]);
 
@@ -912,7 +914,7 @@ export function App() {
     let matchingSavedConnection: SavedConnectionSummary | null = null;
     try {
       matchingSavedConnection = findMatchingSavedConnection(nextForm);
-      const result = await window.electronAPI.connect(nextForm);
+      const result = await api.connect(nextForm);
       const nextSavedConnectionId = result.savedConnectionId ?? matchingSavedConnection?.id ?? null;
       setCurrentSavedConnectionId(nextSavedConnectionId);
       setConnectionForm((previous) => ({ ...previous, password: '', passphrase: '' }));
@@ -944,7 +946,7 @@ export function App() {
     setStatusMessage(`Connecting to ${savedConnection.username}@${savedConnection.host}:${savedConnection.port}...`);
 
     try {
-      const result = await window.electronAPI.connectSaved(savedConnection.id);
+      const result = await api.connectSaved(savedConnection.id);
       setCurrentSavedConnectionId(result.savedConnectionId ?? savedConnection.id);
       setReconnectTarget({
         savedConnectionId: result.savedConnectionId ?? savedConnection.id,
@@ -964,7 +966,7 @@ export function App() {
       const message = getErrorMessage(error, 'Unable to connect');
       if (/private key|passphrase/i.test(message)) {
     try {
-          const savedInput = await window.electronAPI.getSavedConnectionInput(savedConnection.id);
+          const savedInput = await api.getSavedConnectionInput(savedConnection.id);
           const passphrase = window.prompt('Enter SSH private key passphrase (leave blank if none):', '');
           if (passphrase !== null) {
             setConnectionForm({ ...savedInput, passphrase });
@@ -989,7 +991,7 @@ export function App() {
     setQuickCommandsDialogOpen(false);
 
     try {
-      await window.electronAPI.disconnect();
+      await api.disconnect();
       setEntriesByDirectory({});
       setExpandedDirectories(new Set());
       setVisionModeActive(false);
@@ -1025,7 +1027,7 @@ export function App() {
     setSelectedTreePath(nextWorkspacePath);
     setEntriesByDirectory({});
     setExpandedDirectories(new Set([nextWorkspacePath]));
-    void window.electronAPI.startAutomaticMediaCache(nextWorkspacePath).catch(() => {
+    void api.startAutomaticMediaCache(nextWorkspacePath).catch(() => {
       // Preview warming is opportunistic and must never block opening a workspace.
     });
 
@@ -1037,7 +1039,7 @@ export function App() {
     setWorkspacePath(resolvedHomeDir);
     setSelectedTreePath(resolvedHomeDir);
     setExpandedDirectories(new Set([resolvedHomeDir]));
-    void window.electronAPI.startAutomaticMediaCache(resolvedHomeDir).catch(() => undefined);
+    void api.startAutomaticMediaCache(resolvedHomeDir).catch(() => undefined);
     await refreshDirectory(resolvedHomeDir, true);
   }
 
@@ -1045,7 +1047,7 @@ export function App() {
     setIsLoadingSavedConnections(true);
 
     try {
-      const nextSavedConnections = await window.electronAPI.listSavedConnections();
+      const nextSavedConnections = await api.listSavedConnections();
       setSavedConnections(nextSavedConnections);
     } catch (error) {
       if (!silent) {
@@ -1060,7 +1062,7 @@ export function App() {
     setIsLoadingTailscaleHosts(true);
 
     try {
-      const nextHosts = await window.electronAPI.listTailscaleHosts();
+      const nextHosts = await api.listTailscaleHosts();
       setTailscaleHosts(nextHosts);
     } catch (error) {
       if (!silent) {
@@ -1075,7 +1077,7 @@ export function App() {
     setRemovingSavedConnectionId(savedConnectionId);
 
     try {
-      await window.electronAPI.removeSavedConnection(savedConnectionId);
+      await api.removeSavedConnection(savedConnectionId);
       setSavedConnections((previous) => previous.filter((entry) => entry.id !== savedConnectionId));
     } catch (error) {
       setStatusMessage(getErrorMessage(error, 'Unable to remove saved client'));
@@ -1087,7 +1089,7 @@ export function App() {
   async function importSshConfig(): Promise<void> {
     setIsImportingSshConfig(true);
     try {
-      const result = await window.electronAPI.importSshConfig();
+      const result = await api.importSshConfig();
       await loadSavedConnections(true);
       setStatusMessage(result.imported > 0 ? `Imported ${result.imported} SSH host${result.imported === 1 ? '' : 's'}` : `No new SSH hosts found in ${result.sourcePath}`);
     } catch (error) {
@@ -1130,7 +1132,7 @@ export function App() {
     setSavedConnectionRenameBusy(true);
 
     try {
-      await window.electronAPI.renameSavedConnection(
+      await api.renameSavedConnection(
         savedConnectionRenameDialog.savedConnectionId,
         nextDisplayName,
       );
@@ -1182,7 +1184,7 @@ export function App() {
       });
 
     try {
-        const entries = await window.electronAPI.readDir(remotePath);
+        const entries = await api.readDir(remotePath);
         startTransition(() => {
           setEntriesByDirectory((previous) => ({
             ...previous,
@@ -1272,7 +1274,7 @@ export function App() {
   }
 
   async function buildTextTab(connectionId: string, remotePath: string): Promise<EditorTabItem> {
-    const file = await window.electronAPI.readFile(remotePath);
+    const file = await api.readFile(remotePath);
 
     return {
       id: buildTabId(connectionId, remotePath),
@@ -1292,7 +1294,7 @@ export function App() {
    * left empty so the dirty/save paths treat them as clean and read-only.
    */
   async function buildImageTab(connectionId: string, remotePath: string): Promise<EditorTabItem> {
-    const file = await window.electronAPI.readBinaryFile({ path: remotePath });
+    const file = await api.readBinaryFile({ path: remotePath });
 
     return {
       id: buildTabId(connectionId, remotePath),
@@ -1318,7 +1320,7 @@ export function App() {
 
     setReloadingImagePath(tab.path);
     try {
-      const file = await window.electronAPI.readBinaryFile({ path: tab.path });
+      const file = await api.readBinaryFile({ path: tab.path });
       const nextDataUrl = buildImageDataUrl(file.path, file.base64);
 
       setTabs((previous) =>
@@ -1452,7 +1454,7 @@ export function App() {
 
     try {
       const savingContent = tab.content;
-      const result = await window.electronAPI.writeFileAtomic({
+      const result = await api.writeFileAtomic({
         path: tab.path,
         content: savingContent,
       });
@@ -1484,7 +1486,7 @@ export function App() {
     setFileMenuOpen(false);
 
     try {
-      await window.electronAPI.openNewWindow();
+      await api.openNewWindow();
     } catch (error) {
       setStatusMessage(getErrorMessage(error, 'Unable to open a new connection window'));
     }
@@ -1500,7 +1502,7 @@ export function App() {
       throw new Error('Names cannot contain "/"');
     }
 
-    const entry = await window.electronAPI.createEntry({
+    const entry = await api.createEntry({
       parentPath,
       name,
       kind,
@@ -1525,7 +1527,7 @@ export function App() {
     }
 
     const parentPath = getParentPath(entry.path);
-    const renamed = await window.electronAPI.renameEntry({
+    const renamed = await api.renameEntry({
       path: entry.path,
       nextName,
     });
@@ -1577,7 +1579,7 @@ export function App() {
       kind: 'delete',
       request: { path: entry.path, operationId },
     });
-    await window.electronAPI.deleteEntry({ path: entry.path, operationId });
+    await api.deleteEntry({ path: entry.path, operationId });
     const parentPath = entry.kind === 'directory' ? getParentPath(entry.path) : getParentPath(entry.path);
     if (entry.path === workspacePath) {
       await refreshDirectory(rootPath, true);
@@ -1599,7 +1601,7 @@ export function App() {
   }
 
   async function uploadToDirectory(remotePath: string): Promise<void> {
-    const localPaths = await window.electronAPI.pickUploadEntries();
+    const localPaths = await api.pickUploadEntries();
     if (localPaths.length === 0) {
       return;
     }
@@ -1615,7 +1617,7 @@ export function App() {
       kind: 'upload',
       request,
     });
-    const result = await window.electronAPI.uploadLocalEntries(request);
+    const result = await api.uploadLocalEntries(request);
     if (result.status === 'conflict') {
       setConflictDialog({
         kind: 'upload',
@@ -1638,7 +1640,7 @@ export function App() {
 
   async function downloadEntry(entry: RemoteDirectoryEntry): Promise<void> {
     setStatusMessage(`Choose a local destination for ${entry.path}`);
-    const downloadDirectory = await window.electronAPI.pickDownloadDirectory();
+    const downloadDirectory = await api.pickDownloadDirectory();
     if (!downloadDirectory) {
       setStatusMessage('Download canceled');
       return;
@@ -1656,7 +1658,7 @@ export function App() {
       kind: 'download',
       request,
     });
-    const result = await window.electronAPI.downloadEntry(request);
+    const result = await api.downloadEntry(request);
     if (result.status === 'conflict') {
       setConflictDialog({
         kind: 'download',
@@ -1684,7 +1686,7 @@ export function App() {
 
     setSearchBusy(true);
     try {
-      const result = await window.electronAPI.searchInFiles({
+      const result = await api.searchInFiles({
         rootPath: workspacePath,
         query,
         caseSensitive: searchCaseSensitive,
@@ -1786,7 +1788,7 @@ export function App() {
     setTunnelDialogLoading(true);
 
     try {
-      const snapshots: TunnelSnapshot[] = await window.electronAPI.listTunnels(savedConnectionId);
+      const snapshots: TunnelSnapshot[] = await api.listTunnels(savedConnectionId);
       setTunnelSnapshots(snapshots);
       syncSavedConnectionTunnels(
         savedConnectionId,
@@ -1816,8 +1818,8 @@ export function App() {
 
     setVisionModeBusy(true);
     try {
-      const { display } = await window.electronAPI.enableVisionMode();
-      const { streamId } = await window.electronAPI.startVideoStream({
+      const { display } = await api.enableVisionMode();
+      const { streamId } = await api.startVideoStream({
         display,
         width: 1280,
         height: 720,
@@ -1838,9 +1840,9 @@ export function App() {
     setVisionModeBusy(true);
     try {
       if (visionStreamId) {
-        await window.electronAPI.stopVideoStream(visionStreamId);
+        await api.stopVideoStream(visionStreamId);
       }
-      await window.electronAPI.disableVisionMode();
+      await api.disableVisionMode();
       setVisionModeActive(false);
       setVisionStreamId(null);
       setStatusMessage('Vision mode stopped');
@@ -1867,7 +1869,7 @@ export function App() {
     setTunnelSaveBusy(true);
 
     try {
-      await window.electronAPI.saveTunnel(currentSavedConnectionId, config);
+      await api.saveTunnel(currentSavedConnectionId, config);
       await loadTunnelSnapshots(currentSavedConnectionId);
       setStatusMessage(`Saved tunnel ${config.name}`);
     } finally {
@@ -1884,7 +1886,7 @@ export function App() {
     setTunnelBusy(tunnelId, true);
 
     try {
-      await window.electronAPI.removeTunnel(currentSavedConnectionId, tunnelId);
+      await api.removeTunnel(currentSavedConnectionId, tunnelId);
       await loadTunnelSnapshots(currentSavedConnectionId);
       if (tunnel) {
         setStatusMessage(`Deleted tunnel ${tunnel.name}`);
@@ -1903,7 +1905,7 @@ export function App() {
 
     setTunnelBusy(tunnelId, true);
     try {
-      await window.electronAPI.startTunnel(currentSavedConnectionId, tunnelId);
+      await api.startTunnel(currentSavedConnectionId, tunnelId);
     } catch (error) {
       setStatusMessage(getErrorMessage(error, 'Unable to start tunnel'));
     } finally {
@@ -1914,7 +1916,7 @@ export function App() {
   async function stopTunnel(tunnelId: string): Promise<void> {
     setTunnelBusy(tunnelId, true);
     try {
-      await window.electronAPI.stopTunnel(tunnelId);
+      await api.stopTunnel(tunnelId);
     } catch (error) {
       setStatusMessage(getErrorMessage(error, 'Unable to stop tunnel'));
     } finally {
@@ -2026,7 +2028,7 @@ export function App() {
         conflictStrategy: strategy,
       };
       retryRequestsRef.current.set(dialog.operationId, { kind: 'upload', request });
-      const result = await window.electronAPI.uploadLocalEntries(request);
+      const result = await api.uploadLocalEntries(request);
       if (result.status === 'completed') {
         await refreshDirectory(dialog.targetPath, true);
       }
@@ -2040,7 +2042,7 @@ export function App() {
       conflictStrategy: strategy,
     };
     retryRequestsRef.current.set(dialog.operationId, { kind: 'download', request });
-    const result = await window.electronAPI.downloadEntry(request);
+    const result = await api.downloadEntry(request);
     if (result.status === 'conflict') {
       setConflictDialog(dialog);
     }
@@ -2055,12 +2057,12 @@ export function App() {
       }
 
       if (retryRequest.kind === 'delete') {
-        await window.electronAPI.deleteEntry(retryRequest.request);
+        await api.deleteEntry(retryRequest.request);
         return;
       }
 
       if (retryRequest.kind === 'upload') {
-        await window.electronAPI.uploadLocalEntries({
+        await api.uploadLocalEntries({
           ...retryRequest.request,
           conflictStrategy: 'overwrite',
         });
@@ -2068,7 +2070,7 @@ export function App() {
         return;
       }
 
-      await window.electronAPI.downloadEntry({
+      await api.downloadEntry({
         ...retryRequest.request,
         conflictStrategy: 'overwrite',
       });
@@ -2238,7 +2240,7 @@ export function App() {
 
       if (action === 'idle-download') {
         setStatusMessage(`Choosing destination for idle download of ${entry.path}`);
-        void window.electronAPI
+        void api
           .queueIdleDownload({ remotePath: entry.path })
           .then((snapshot) => {
             if (snapshot) {
@@ -2294,6 +2296,12 @@ export function App() {
 
   return (
     <div className="app-shell">
+      {visionStreamId && Boolean((window as unknown as { go?: unknown }).go) && (
+        <div className="wails-video-overlay">
+          <button type="button" onClick={() => void stopVisionMode()}>关闭视频</button>
+          <VideoObserverWindow streamId={visionStreamId} />
+        </div>
+      )}
       <header className="topbar">
         <div className="menu-bar">
           <div className="menu-bar-left">
@@ -2559,7 +2567,7 @@ export function App() {
                   type="button"
                   className="secondary-button connection-banner-action"
                   onClick={() => {
-                    void window.electronAPI.openExternal(connectionStatus.authUrl!);
+                    void api.openExternal(connectionStatus.authUrl!);
                   }}
                   disabled={busyAction !== null}
                 >
@@ -2584,7 +2592,7 @@ export function App() {
                   type="button"
                   className="secondary-button connection-banner-action"
                   onClick={() => {
-                    void window.electronAPI.openExternal(connectionStatus.authUrl!);
+                    void api.openExternal(connectionStatus.authUrl!);
                   }}
                   disabled={busyAction !== null}
                 >
@@ -2780,7 +2788,7 @@ export function App() {
                           type="button"
                           className="status-inline-button"
                           onClick={() => {
-                            void window.electronAPI.cancelFileOperation(operation.operationId);
+                            void api.cancelFileOperation(operation.operationId);
                           }}
                         >
                           Cancel
@@ -2800,7 +2808,7 @@ export function App() {
                           className="status-inline-button"
                           onClick={(event) => {
                             event.preventDefault();
-                            void window.electronAPI.cancelIdleDownloadGroup(group.rootPath).then(setIdleTransferSnapshot);
+                            void api.cancelIdleDownloadGroup(group.rootPath).then(setIdleTransferSnapshot);
                           }}
                         >
                           Cancel all
@@ -2855,7 +2863,7 @@ export function App() {
                     type="button"
                     className="status-inline-button"
                     onClick={() => {
-                      void window.electronAPI.cancelFileOperation(operation.operationId);
+                      void api.cancelFileOperation(operation.operationId);
                     }}
                   >
                     Cancel
@@ -2925,7 +2933,7 @@ export function App() {
           initialPath={folderPickerInitialPath}
           homePath={rootPath}
           isBusy={folderPickerBusy}
-          onReadDirectory={window.electronAPI.readDir}
+          onReadDirectory={api.readDir}
           onCancel={closeFolderPicker}
           onConfirm={(remotePath) => {
             void submitFolderPicker(remotePath);
@@ -3209,7 +3217,7 @@ export function App() {
                 type="button"
                 className="primary-button"
                 onClick={() => {
-                  void window.electronAPI.openExternal(tailscaleAuthDialog.url);
+                  void api.openExternal(tailscaleAuthDialog.url);
                 }}
               >
                 <ExternalLink size={16} />

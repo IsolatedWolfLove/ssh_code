@@ -12,6 +12,7 @@ import type {
   TerminalEvent,
 } from '../../../shared/contracts';
 import { getScaledFontSize, useWindowFontScale } from '../window-font-scale';
+import api from '../lib/api';
 
 interface TerminalPanelProps {
   connectionStatus: ConnectionStatePayload;
@@ -140,7 +141,7 @@ function TerminalInstance({
     }
 
     try {
-      await window.electronAPI.writeClipboardText(selection);
+      await api.writeClipboardText(selection);
     } catch (error) {
       onStatusMessage(getErrorMessage(error, 'Unable to copy terminal selection'));
     }
@@ -152,7 +153,7 @@ function TerminalInstance({
     }
 
     try {
-      const text = await window.electronAPI.readClipboardText();
+      const text = await api.readClipboardText();
       if (text !== '') {
         terminalRef.current?.paste(text);
       }
@@ -233,7 +234,7 @@ function TerminalInstance({
     const fitAndResize = () => {
       fitAddon.fit();
       if (readyRef.current) {
-        void window.electronAPI.resizeTerminal(sessionId, terminal.cols, terminal.rows);
+        void api.resizeTerminal(sessionId, terminal.cols, terminal.rows);
       }
     };
     const scheduleFitAndResize = () => {
@@ -260,7 +261,7 @@ function TerminalInstance({
         return;
       }
 
-      void window.electronAPI.writeTerminal(sessionId, value);
+      void api.writeTerminal(sessionId, value);
     });
 
     const unregisterSink = registerSink(sessionId, (event, source) => {
@@ -326,7 +327,7 @@ function TerminalInstance({
     fitAddon.fit();
 
     if (readyRef.current) {
-      void window.electronAPI.resizeTerminal(sessionId, terminal.cols, terminal.rows);
+      void api.resizeTerminal(sessionId, terminal.cols, terminal.rows);
     }
   }, [fontScale, sessionId]);
 
@@ -339,7 +340,7 @@ function TerminalInstance({
     fitAddonRef.current?.fit();
 
     if (readyRef.current && terminalRef.current) {
-      void window.electronAPI.resizeTerminal(sessionId, terminalRef.current.cols, terminalRef.current.rows);
+      void api.resizeTerminal(sessionId, terminalRef.current.cols, terminalRef.current.rows);
     }
   }, [active, sessionId]);
 
@@ -441,7 +442,7 @@ function TerminalPanelComponent({
   }, [connectionStatus.connectionId]);
 
   useEffect(() => {
-    const unsubscribe = window.electronAPI.onTerminalEvent((event: TerminalEvent) => {
+    const unsubscribe = api.onTerminalEvent((event: TerminalEvent) => {
       if (ignoredTerminalIdsRef.current.has(event.terminalId)) {
         return;
       }
@@ -509,7 +510,7 @@ function TerminalPanelComponent({
     // survive a disconnect, and so a reconnect can offer the sessions that are
     // still running from before.
     let cancelled = false;
-    void window.electronAPI
+    void api
       .getRemoteShellSupport()
       .then((support) => {
         if (cancelled || connectionIdRef.current !== connectionId) {
@@ -551,7 +552,7 @@ function TerminalPanelComponent({
       }
 
       syncedPathsRef.current.set(terminal.id, workspacePath);
-      void window.electronAPI.writeTerminal(terminal.id, `cd -- ${shellEscape(workspacePath)}\n`).catch(() => {
+      void api.writeTerminal(terminal.id, `cd -- ${shellEscape(workspacePath)}\n`).catch(() => {
         syncedPathsRef.current.set(terminal.id, null);
       });
     }
@@ -655,14 +656,14 @@ function TerminalPanelComponent({
     setBusyAction(mode === 'split' ? 'splitting' : 'creating');
 
     try {
-      const result = await window.electronAPI.createTerminal(
+      const result = await api.createTerminal(
         persistentKindRef.current === 'none'
           ? undefined
           : { sessionName: buildUnusedSessionName(), workspacePath },
       );
       if (connectionIdRef.current !== expectedConnectionId) {
         ignoredTerminalIdsRef.current.add(result.terminalId);
-        void window.electronAPI.closeTerminal(result.terminalId).catch(() => {
+        void api.closeTerminal(result.terminalId).catch(() => {
           // Ignore stale terminal cleanup failures after a reconnect.
         });
         return null;
@@ -735,7 +736,7 @@ function TerminalPanelComponent({
         }
 
         try {
-          await window.electronAPI.writeTerminal(terminalId, commandText);
+          await api.writeTerminal(terminalId, commandText);
           onStatusMessage(`Running ${label?.trim() || normalizedCommand}`);
         } catch (error) {
           onStatusMessage(getErrorMessage(error, 'Unable to run command'));
@@ -752,7 +753,7 @@ function TerminalPanelComponent({
 
     setSessionsLoading(true);
     try {
-      const support = await window.electronAPI.getRemoteShellSupport();
+      const support = await api.getRemoteShellSupport();
       persistentKindRef.current = support.kind;
       setPersistentKind(support.kind);
       setRemoteSessions(support.sessions);
@@ -784,10 +785,10 @@ function TerminalPanelComponent({
     setBusyAction('creating');
 
     try {
-      const result = await window.electronAPI.createTerminal({ sessionName: session.name });
+      const result = await api.createTerminal({ sessionName: session.name });
       if (connectionIdRef.current !== expectedConnectionId) {
         ignoredTerminalIdsRef.current.add(result.terminalId);
-        void window.electronAPI.closeTerminal(result.terminalId).catch(() => {
+        void api.closeTerminal(result.terminalId).catch(() => {
           // Ignore stale terminal cleanup failures after a reconnect.
         });
         return;
@@ -837,7 +838,7 @@ function TerminalPanelComponent({
     }
 
     try {
-      await window.electronAPI.killRemoteShellSession(session.name);
+      await api.killRemoteShellSession(session.name);
       setRemoteSessions((previous) => previous.filter((item) => item.name !== session.name));
       onStatusMessage(`Ended session ${session.name}`);
     } catch (error) {
@@ -854,7 +855,7 @@ function TerminalPanelComponent({
     removeTerminalFromState(terminalId);
 
     try {
-      await window.electronAPI.closeTerminal(terminalId);
+      await api.closeTerminal(terminalId);
       onStatusMessage(`Closed ${terminal.label}`);
     } catch (error) {
       onStatusMessage(getErrorMessage(error, `Unable to close ${terminal.label}`));

@@ -1,3 +1,4 @@
+import api from './lib/api';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type * as MonacoEditor from 'monaco-editor';
 
@@ -255,7 +256,7 @@ export function useRemoteLanguageServer({
 
     const sessionId = session.id;
     enqueueDocumentOperation(() =>
-      window.electronAPI.openLanguageDocument({
+      api.openLanguageDocument({
         sessionId,
         remotePath,
         languageId: model.getLanguageId(),
@@ -268,7 +269,7 @@ export function useRemoteLanguageServer({
         return;
       }
       enqueueDocumentOperation(() =>
-        window.electronAPI.changeLanguageDocument({
+        api.changeLanguageDocument({
           sessionId,
           remotePath,
           version: model.getVersionId(),
@@ -294,7 +295,7 @@ export function useRemoteLanguageServer({
     monaco.editor.setModelMarkers(document.model, MARKER_OWNER, []);
     const sessionId = activeSessionRef.current?.id;
     if (notify && sessionId) {
-      enqueueDocumentOperation(() => window.electronAPI.closeLanguageDocument({ sessionId, remotePath }));
+      enqueueDocumentOperation(() => api.closeLanguageDocument({ sessionId, remotePath }));
     }
   }
 
@@ -312,7 +313,7 @@ export function useRemoteLanguageServer({
       return null;
     }
     await documentQueueRef.current;
-    return window.electronAPI.requestLanguageFeature({
+    return api.requestLanguageFeature({
       sessionId: session.id,
       remotePath,
       feature,
@@ -321,7 +322,7 @@ export function useRemoteLanguageServer({
   }
 
   useEffect(() => {
-    const unsubscribeState = window.electronAPI.onLanguageServerState((event: LanguageServerStateEvent) => {
+    const unsubscribeState = api.onLanguageServerState((event: LanguageServerStateEvent) => {
       if (event.workspacePath !== workspacePath || event.language !== 'typescript') {
         return;
       }
@@ -339,7 +340,7 @@ export function useRemoteLanguageServer({
         }
       }
     });
-    const unsubscribeDiagnostics = window.electronAPI.onLanguageServerDiagnostics((event: LanguageServerDiagnosticsEvent) => {
+    const unsubscribeDiagnostics = api.onLanguageServerDiagnostics((event: LanguageServerDiagnosticsEvent) => {
       if (event.sessionId !== activeSessionRef.current?.id) {
         return;
       }
@@ -364,7 +365,7 @@ export function useRemoteLanguageServer({
       clearOpenDocuments();
       diagnosticsRef.current.clear();
       setBuiltInTypeScriptFeaturesEnabled(true);
-      void window.electronAPI.stopLanguageServer(current.id).catch(() => undefined);
+      void api.stopLanguageServer(current.id).catch(() => undefined);
     }
 
     if (!desiredSessionKey || !connectionId) {
@@ -379,11 +380,11 @@ export function useRemoteLanguageServer({
     attemptedSessionKeyRef.current = desiredSessionKey;
     setViewState({ status: 'starting', message: 'Starting remote TypeScript language server...' });
 
-    void window.electronAPI
+    void api
       .startLanguageServer({ workspacePath, language: 'typescript' })
       .then((result: StartLanguageServerResult) => {
         if (cancelled) {
-          return window.electronAPI.stopLanguageServer(result.sessionId);
+          return api.stopLanguageServer(result.sessionId);
         }
         activeSessionRef.current = {
           id: result.sessionId,
@@ -531,7 +532,7 @@ export function useRemoteLanguageServer({
       if (!document || tab.connectionId !== session.connectionId || document.savedContent === tab.savedContent) continue;
       document.savedContent = tab.savedContent;
       enqueueDocumentOperation(() =>
-        window.electronAPI.saveLanguageDocument({ sessionId: session.id, remotePath: tab.path }),
+        api.saveLanguageDocument({ sessionId: session.id, remotePath: tab.path }),
       );
     }
   }, [tabs]);
@@ -540,7 +541,7 @@ export function useRemoteLanguageServer({
     return () => {
       const session = activeSessionRef.current;
       activeSessionRef.current = null;
-      if (session) void window.electronAPI.stopLanguageServer(session.id).catch(() => undefined);
+      if (session) void api.stopLanguageServer(session.id).catch(() => undefined);
     };
   }, []);
 

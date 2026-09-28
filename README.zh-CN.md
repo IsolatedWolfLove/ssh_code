@@ -2,7 +2,7 @@
 
 语言：[English](README.md) | 中文
 
-SSH Studio 是一个桌面端 SSH 远程工作区工具，用来把终端、SFTP 客户端和编辑器合到一个窗口里。它基于 Electron 构建，集成 SSH 连接历史、SFTP 文件树、Monaco 远程编辑、工作区搜索、内置终端、SSH 隧道，以及可选的远程画面观察能力。
+SSH Studio 是一个桌面端 SSH 远程工作区工具，用来把终端、SFTP 客户端和编辑器合到一个窗口里。它基于 Go 和 Wails 构建，集成 SSH 连接历史、SFTP 文件树、Monaco 远程编辑、工作区搜索、内置终端、SSH 隧道，以及可选的远程画面观察能力。
 
 ## 功能亮点
 
@@ -12,7 +12,7 @@ SSH Studio 是一个桌面端 SSH 远程工作区工具，用来把终端、SFTP
 - 保存最近连接，支持重命名，并记住远程工作区路径。
 - 通过 SFTP 浏览远程目录，也可以把任意远程目录打开为当前工作区。
 - 支持创建、重命名、删除、上传和下载远程文件或文件夹。
-- 传输大文件时提供实时进度条（百分比、速率、预计剩余时间）和取消按钮，并支持字节级断点续传：上传或下载中断后会从断点继续，而不是从头重来。传输过程写入临时 `.part` 文件，全部完成后才原子替换为最终文件。
+- 传输大文件时提供实时进度条（百分比、速率、预计剩余时间）和取消按钮，并支持字节级断点续传：上传或下载中断后会从断点继续，而不是从头重来。传输过程写入临时 `.sshstudio-part` 文件，全部完成后才原子替换为最终文件。
 - Monaco 多标签远程编辑，支持语言识别、未保存状态、手动保存和自动保存。
 - 工作区或远端 PATH 安装语言服务器后，支持 TypeScript/JavaScript 补全、Hover、诊断和跳转定义。
 - 保存远程文件时使用临时文件写入，再远程重命名或替代写入，降低中断风险。
@@ -24,7 +24,7 @@ SSH Studio 是一个桌面端 SSH 远程工作区工具，用来把终端、SFTP
 - 终端工作目录会跟随当前工作区同步。
 - 本地保存快速命令，并可在新的工作区终端中运行。
 - 在已保存连接中管理本地、远程和动态 SSH 隧道。
-- Vision Mode 可启动远程虚拟显示，并在独立视频窗口中观察画面。
+- Vision Mode 可启动远程虚拟显示，并在视频面板中观察画面。
 
 ## 使用流程
 
@@ -43,7 +43,7 @@ SSH Studio 是一个桌面端 SSH 远程工作区工具，用来把终端、SFTP
 - 可选：远程机器安装 `nvidia-smi`，用于 GPU 指标；CPU、内存和磁盘通过 `/proc` 和 `df` 读取。
 - 可选：远程工作区安装 `typescript-language-server` 和 `typescript`，用于 TypeScript/JavaScript 语言智能。
 - 可选：远程机器安装支持 X11 捕获的 `Xvfb` 和 `ffmpeg`，用于 Vision Mode。
-- 构建全部远端 server 平台产物时需要 Go 1.20 或更高版本。
+- 桌面后端需要 Go 1.26.6+。Linux 构建需要 `libgtk-3-dev` 和 `libwebkit2gtk-4.1-dev`；Windows 需要 WebView2；macOS 需要 Xcode 命令行工具。
 
 ## 开发
 
@@ -52,13 +52,14 @@ npm install
 npm run dev
 ```
 
-开发时使用 `npm run server:build` 构建本机 Linux server 产物。发布打包会通过 `npm run server:build:all` 构建 Linux 和 macOS 的 x64/arm64 产物。server 使用 SSH 的 stdio 通道通信，不会在远端开放 TCP 端口。
+`npm run dev` 启动 Wails；`npm run build` 生成 `server/build/bin/ssh-studio`（Windows 为 `.exe`，macOS 为 `.app`）。脚本会使用固定版本 Wails CLI，无需单独安装。可用 `GO=/path/to/go` 指定 Go。前端仍为 React/TypeScript，SSH 和桌面后端使用 Go。旧 Electron 代码保留用于对照回归，可通过 `dev:electron` / `build:electron` 显式启动；默认构建和发布已切换到 Wails。
 
 ## 质量检查
 
 ```bash
 npm run typecheck
 npm test
+npm run server:test
 npm run build
 ```
 
@@ -67,10 +68,11 @@ npm run build
 ```bash
 npm run package
 npm run package:deb
+npm run package:mac
 npm run package:win
 ```
 
-构建产物会输出到 `release/`。
+安装包输出到 `release/`。请在目标操作系统上打包：Linux 生成 deb，macOS 生成 dmg/zip，Windows 通过 NSIS 生成安装器。
 
 ## 快捷键
 
@@ -86,7 +88,7 @@ npm run package:win
 
 ## 数据与安全
 
-成功连接过的 SSH 配置会保存在 Electron 的用户数据目录中。密码和私钥口令会在平台支持时使用 Electron `safeStorage` 加密；如果平台不支持，会使用 base64 兼容回退，这不等同于加密。快速命令保存在渲染进程的 `localStorage` 中。
+连接配置保存在系统配置目录下的 `ssh-studio` 文件夹中。密码和私钥口令使用 AES-GCM 加密，密钥保存在同目录的 `store.key`（Unix 权限 0600）。首次启动会尝试导入旧 Electron 连接；旧版 `safeStorage` 加密的密码需要重新输入。快速命令仍保存在界面的 `localStorage` 中，旧 Electron 界面数据不会自动迁移。
 
 主机校验可以使用 `known_hosts` 文件。关闭主机校验适合一次性开发环境，但会移除 SSH 主机身份检查。
 
@@ -97,20 +99,22 @@ SSH Studio 会优先尝试在远程主机上运行 `rg`，以获得更快的 JSO
 ## 项目结构
 
 ```text
-src/main/        Electron 主进程、SSH 会话、SFTP、隧道、打包相关逻辑
-src/preload/     安全的渲染进程到主进程 API 桥接
-src/renderer/    React UI、Monaco 编辑器、终端面板、弹窗
-src/shared/      主进程、preload 和渲染进程共享的 IPC 契约
-build/           安装器资源
-release/         生成的安装包和解包构建产物
+server/app/       Wails API and connection lifecycle
+server/internal/  Go SSH, filesystem, tunnels, terminal, LSP and media modules
+server/main.go    Native desktop entry point
+src/renderer/     React UI, Monaco, xterm.js and Wails bridge
+src/shared/       TypeScript API contracts
+src/main/         Legacy Electron implementation and regression tests
+scripts/          Native build and packaging commands
+release/          Generated installers
 ```
 
 ## 技术栈
 
-- Electron 和 electron-vite
+- Go 和 Wails v2
 - React 19 和 TypeScript
 - Monaco Editor
 - xterm.js
-- `ssh2`
+- `golang.org/x/crypto/ssh` 和 `github.com/pkg/sftp`
 - `react-resizable-panels`
 - lucide-react

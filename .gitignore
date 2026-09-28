@@ -6,3 +6,11 @@ dist
 dist-electron
 .DS_Store
 *.log
+
+# Wails (server/) build artifacts and generated bindings
+server/build/bin/
+!server/frontend/dist/
+server/frontend/dist/*
+!server/frontend/dist/.gitkeep
+src/renderer/dist/
+src/renderer/src/wailsjs/

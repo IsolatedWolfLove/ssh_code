@@ -1,117 +1,113 @@
-name: Build Release Artifacts
+name: Build and Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 jobs:
   build:
-    name: Build ${{ matrix.label }}
-    runs-on: ${{ matrix.runs_on }}
-    timeout-minutes: 40
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
-          - label: Linux Deb
-            platform: linux
-            runs_on: ubuntu-22.04
-            package_command: npm run package:deb
-            artifact_path: release/*.deb
-          - label: macOS DMG
-            platform: macos
-            runs_on: macos-14
-            package_command: npm run package:mac
-            artifact_path: |
-              release/*.dmg
-              release/*.zip
-          - label: Windows EXE
-            platform: windows
-            runs_on: windows-2022
-            package_command: npm run package:win
-            artifact_path: release/*.exe
-
+          - platform: linux
+            runner: ubuntu-24.04
+            target: deb
+          - platform: macos
+            runner: macos-14
+            target: mac
+          - platform: windows
+            runner: windows-2022
+            target: win
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          node-version: 20
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
           cache: npm
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: server/go.mod
-          cache: false
-
-      - name: Install Linux packaging dependencies
-        if: matrix.platform == 'linux'
-        shell: bash
+          cache-dependency-path: server/go.sum
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y fakeroot dpkg
-
-      - name: Install npm dependencies
-        shell: bash
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev dpkg
+      - name: Install Windows installer compiler
+        if: runner.os == 'Windows'
+        run: choco install nsis --no-progress -y
+      - name: Install dependencies
         run: npm ci
-
-      - name: Prepare Debian metadata
-        if: matrix.platform == 'linux'
-        shell: bash
-        env:
-          REPOSITORY_URL: ${{ github.server_url }}/${{ github.repository }}
-          REPOSITORY_OWNER: ${{ github.repository_owner }}
+      - name: Check versions and frontend
         run: |
-          node <<'NODE'
-          const fs = require('fs');
-          const packageJsonPath = 'package.json';
-          const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
-          const owner = process.env.REPOSITORY_OWNER;
-          const homepage = process.env.REPOSITORY_URL;
-          const email = `${owner}@users.noreply.github.com`;
-
-          pkg.homepage ??= homepage;
-          pkg.author = typeof pkg.author === 'string'
-            ? { name: pkg.author, email }
-            : {
-                name: pkg.author?.name || owner,
-                email: pkg.author?.email || email,
-              };
-          pkg.build ??= {};
-          pkg.build.linux ??= {};
-          pkg.build.linux.maintainer ??= `${pkg.author.name} <${pkg.author.email}>`;
-
-          fs.writeFileSync(packageJsonPath, `${JSON.stringify(pkg, null, 2)}\n`);
-          NODE
-
-      - name: Read app version
-        shell: bash
+          node scripts/check-version.mjs
+          npm run typecheck
+          npm test -- --maxWorkers=1
+      - name: Verify and test Go modules
+        working-directory: server
         run: |
-          APP_VERSION=$(node -p "require('./package.json').version")
-          echo "APP_VERSION=${APP_VERSION}" >> "$GITHUB_ENV"
-
-      - name: Build release package
-        shell: bash
-        env:
-          CSC_IDENTITY_AUTO_DISCOVERY: ${{ matrix.platform == 'macos' && 'false' || '' }}
-        run: ${{ matrix.package_command }}
-
-      - name: Upload workflow artifact
-        uses: actions/upload-artifact@v4
+          go mod verify
+          go test ./... -timeout=180s
+      - name: Check Go race conditions
+        if: runner.os == 'Linux'
+        working-directory: server
+        run: go test -race ./... -timeout=180s
+      - name: Audit dependencies
+        if: runner.os == 'Linux'
+        run: |
+          npm audit --audit-level=moderate
+          cd server
+          go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+      - name: Build native package
+        run: node scripts/package-wails.mjs ${{ matrix.target }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ssh-studio-${{ matrix.platform }}-${{ env.APP_VERSION }}
-          path: ${{ matrix.artifact_path }}
+          name: ssh-studio-${{ matrix.platform }}
+          path: release/*
           if-no-files-found: error
+          retention-days: 14
 
-      - name: Upload package to GitHub Release
-        uses: softprops/action-gh-release@v2
+  release:
+    name: Publish release
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          files: ${{ matrix.artifact_path }}
-          fail_on_unmatched_files: true
+          pattern: ssh-studio-*
+          merge-multiple: true
+          path: release
+      - name: Generate checksums
+        working-directory: release
+        run: sha256sum *.deb *.dmg *.zip *.exe > SHA256SUMS
+      - name: Publish all packages together
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --draft --title "SSH Studio $RELEASE_TAG" --generate-notes
+          fi
+          gh release upload "$RELEASE_TAG" release/* --clobber
+          gh release edit "$RELEASE_TAG" --draft=false
